@@ -1,0 +1,11 @@
+[project]
+name = "grocery-intelligence"
+version = "0.1.0"
+description = "AI-powered grocery search and substitute recommendation system using real product data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
