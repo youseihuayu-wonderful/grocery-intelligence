@@ -1,22 +1,22 @@
 """Hybrid search engine combining BM25 keyword search and semantic search.
 
 Search pipeline:
-1. User query → LLM query rewriting (optional)
-2. BM25 keyword search → top-100 candidates
-3. Semantic embedding search → top-100 candidates
-4. Merge candidates (reciprocal rank fusion)
-5. Cross-encoder reranking → top-K results
-6. Business rule filtering (price, dietary, stock)
-7. LLM explanation generation
+1. User query -> BM25 keyword search -> top-N candidates
+2. User query -> Semantic embedding search -> top-N candidates
+3. Merge candidates (reciprocal rank fusion)
+4. Cross-encoder reranking -> top-K results
+5. Return enriched product results
 """
 
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from rank_bm25 import BM25Okapi
 from loguru import logger
 
 from src.models.embeddings import ProductEmbedder, build_product_text
-from src.models.reranker import ProductReranker
+
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 
 class GrocerySearchEngine:
@@ -25,31 +25,46 @@ class GrocerySearchEngine:
     def __init__(
         self,
         catalog: pd.DataFrame,
+        embeddings: np.ndarray | None = None,
         embedder: ProductEmbedder | None = None,
-        reranker: ProductReranker | None = None,
+        reranker=None,
     ):
-        self.catalog = catalog
+        self.catalog = catalog.reset_index(drop=True)
         self.embedder = embedder or ProductEmbedder()
-        self.reranker = reranker or ProductReranker()
+        self.reranker = reranker  # Lazy-loaded on first use if None
 
         # Build product text representations
         self.product_texts = [
-            build_product_text(row) for _, row in catalog.iterrows()
+            build_product_text(row) for _, row in self.catalog.iterrows()
         ]
-        self.product_ids = catalog["product_id"].astype(str).tolist()
+        self.product_ids = self.catalog["product_id"].astype(str).tolist()
 
         # Initialize BM25 index
         tokenized = [text.lower().split() for text in self.product_texts]
         self.bm25 = BM25Okapi(tokenized)
 
-        # Build or load embeddings
-        self.embeddings = self.embedder.build_product_embeddings(
-            self.product_texts, self.product_ids, save=True
-        )
+        # Load pre-computed embeddings or build them
+        if embeddings is not None:
+            self.embeddings = embeddings
+        else:
+            emb_path = DATA_DIR / "embeddings" / "product_embeddings.npy"
+            if emb_path.exists():
+                self.embeddings = np.load(emb_path)
+                logger.info(f"Loaded pre-computed embeddings: {self.embeddings.shape}")
+            else:
+                logger.info("No pre-computed embeddings found, building...")
+                self.embeddings = self.embedder.embed_texts(self.product_texts)
 
         logger.info(
             f"Search engine initialized with {len(self.catalog)} products"
         )
+
+    def _get_reranker(self):
+        """Lazy-load the cross-encoder reranker on first use."""
+        if self.reranker is None:
+            from src.models.reranker import ProductReranker
+            self.reranker = ProductReranker()
+        return self.reranker
 
     def search(
         self,
@@ -97,40 +112,39 @@ class GrocerySearchEngine:
             reverse=True,
         )
 
-        # Take top candidates for reranking
+        # Step 4: Cross-encoder reranking (top 50 candidates)
         rerank_count = min(50, len(fused_candidates))
         top_candidates = fused_candidates[:rerank_count]
 
-        # Step 4: Cross-encoder reranking
         if use_reranker and top_candidates:
-            candidate_texts = [self.product_texts[i] for i in top_candidates]
-            candidate_ids = [self.product_ids[i] for i in top_candidates]
+            try:
+                reranker = self._get_reranker()
+                candidate_texts = [self.product_texts[i] for i in top_candidates]
+                candidate_ids = [self.product_ids[i] for i in top_candidates]
 
-            reranked = self.reranker.rerank(
-                query, candidate_texts, candidate_ids, top_k=top_k
-            )
+                reranked = reranker.rerank(
+                    query, candidate_texts, candidate_ids, top_k=top_k
+                )
 
-            # Enrich with full product data
-            results = []
-            for item in reranked:
-                pid = int(item["product_id"])
-                product_row = self.catalog[
-                    self.catalog["product_id"] == pid
-                ].iloc[0]
-                results.append({
-                    **product_row.to_dict(),
-                    "relevance_score": item["relevance_score"],
-                })
-            return results
+                # Enrich with full product data
+                results = []
+                for item in reranked:
+                    pid = int(item["product_id"])
+                    match = self.catalog[self.catalog["product_id"] == pid]
+                    if not match.empty:
+                        row = match.iloc[0].to_dict()
+                        row["relevance_score"] = item["relevance_score"]
+                        results.append(row)
+                return results
+            except Exception as e:
+                logger.warning(f"Reranker failed, falling back to RRF: {e}")
 
         # Fallback: return by fused score without reranking
         results = []
         for idx in top_candidates[:top_k]:
-            product_row = self.catalog.iloc[idx]
-            results.append({
-                **product_row.to_dict(),
-                "relevance_score": float(candidate_scores[idx]),
-            })
+            row = self.catalog.iloc[idx].to_dict()
+            row["relevance_score"] = float(candidate_scores[idx])
+            results.append(row)
         return results
 
     def search_by_category(
@@ -140,4 +154,10 @@ class GrocerySearchEngine:
         filtered = self.catalog[
             self.catalog["category"].str.contains(category, case=False, na=False)
         ]
+        if "order_count" in filtered.columns:
+            filtered = filtered.sort_values("order_count", ascending=False)
         return filtered.head(top_k).to_dict("records")
+
+    def get_categories(self) -> list[str]:
+        """Return all unique product categories."""
+        return sorted(self.catalog["category"].dropna().unique().tolist())
