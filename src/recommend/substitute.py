@@ -162,25 +162,43 @@ class SubstituteRecommender:
     def find_cheaper_alternatives(
         self, product_id: int, top_k: int = 5
     ) -> list[dict]:
-        """Find cheaper substitutes in the same category."""
+        """Find cheaper substitutes in the same category.
+
+        Falls back to most popular same-category products when price data
+        is unavailable (e.g. Instacart dataset has no prices).
+        """
         product_mask = self.catalog["product_id"] == product_id
         if not product_mask.any():
             return []
 
         original = self.catalog[product_mask].iloc[0]
 
-        if "price" not in self.catalog.columns or pd.isna(original.get("price")):
-            logger.warning("No price data available for cheaper alternatives")
-            return []
+        has_price = "price" in self.catalog.columns and pd.notna(original.get("price"))
 
+        # Same-category candidates (excluding original)
         candidates = self.catalog[
             (self.catalog["category"] == original.get("category"))
             & (self.catalog["product_id"] != product_id)
-            & (self.catalog["price"] < original["price"])
         ].copy()
 
-        candidates = candidates.sort_values("price", ascending=True)
-        return candidates.head(top_k).to_dict("records")
+        if has_price:
+            candidates = candidates[candidates["price"] < original["price"]]
+            candidates = candidates.sort_values("price", ascending=True)
+        elif "order_count" in candidates.columns:
+            # No price data — return most popular same-category products instead
+            logger.info("No price data; returning popular same-category alternatives")
+            candidates = candidates.sort_values("order_count", ascending=False)
+        else:
+            return []
+
+        results = candidates.head(top_k).to_dict("records")
+        for r in results:
+            r["substitution_reasons"] = self._explain_substitution(
+                original.to_dict(), r
+            )
+            if not has_price:
+                r["substitution_reasons"].append("Popular in category (no price data)")
+        return results
 
     @staticmethod
     def _explain_substitution(original: dict, substitute: dict) -> list[str]:

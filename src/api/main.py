@@ -16,7 +16,7 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 class SearchRequest(BaseModel):
     query: str
     top_k: int = 10
-    use_reranker: bool = True
+    use_reranker: bool = False
 
 
 class SubstituteRequest(BaseModel):

@@ -152,7 +152,7 @@ class TestAPIModels:
         from src.api.main import SearchRequest
         req = SearchRequest(query="yogurt")
         assert req.top_k == 10
-        assert req.use_reranker is True
+        assert req.use_reranker is False
 
     def test_substitute_request_defaults(self):
         from src.api.main import SubstituteRequest

@@ -92,7 +92,7 @@ with tab1:
     with col2:
         top_k = st.slider("Results", 5, 20, 10)
     with col3:
-        use_reranker = st.checkbox("AI Reranking", value=True)
+        use_reranker = st.checkbox("AI Reranking (cross-encoder)", value=False)
 
     if st.button("Search", type="primary", use_container_width=True) and query:
         with st.spinner("Searching across 49,688 products..."):
