@@ -165,3 +165,28 @@ class TestAPIModels:
         pr = ProductResult(product_id=1, product_name="Test")
         assert pr.category is None
         assert pr.relevance_score is None
+
+
+# ── LTR Model Tests ──────────────────────────────────────────────────────────
+
+
+class TestLTRModel:
+    def test_feature_names(self):
+        from src.models.ltr import LTRModel
+        ltr = LTRModel()
+        assert "bm25_score" in ltr.feature_names
+        assert "semantic_score" in ltr.feature_names
+        assert "order_count_log" in ltr.feature_names
+        assert len(ltr.feature_names) == 12
+
+    def test_grade_map(self):
+        from src.models.ltr import GRADE_MAP
+        assert GRADE_MAP["a"] == 5
+        assert GRADE_MAP["e"] == 1
+        assert len(GRADE_MAP) == 5
+
+    def test_model_not_trained(self):
+        from src.models.ltr import LTRModel
+        ltr = LTRModel()
+        assert ltr.model is None
+        assert ltr.feature_importance() == {}

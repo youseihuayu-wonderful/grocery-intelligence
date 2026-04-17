@@ -3,10 +3,11 @@
 A demo UI for semantic grocery search and substitute recommendations.
 """
 
+import os
 import streamlit as st
 import requests
 
-API_URL = "http://localhost:8000"
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 st.set_page_config(
     page_title="Grocery Intelligence",

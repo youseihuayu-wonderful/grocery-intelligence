@@ -1,0 +1,11 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/raw/
+data/embeddings/eval_scores.pkl
+data/embeddings/query_embeddings_eval.npy
+notebooks/
+*.egg-info/
+.env
