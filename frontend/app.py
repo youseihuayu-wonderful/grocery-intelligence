@@ -123,51 +123,83 @@ with tab1:
                 st.warning("Search timed out. Try a simpler query or disable reranking.")
 
 with tab2:
-    st.markdown("Find alternatives when a product is out of stock.")
+    st.markdown("Find alternatives when a product is out of stock — search by name to find your product.")
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        product_id = st.number_input("Product ID", min_value=1, value=1, step=1)
-    with col2:
-        sub_type = st.selectbox(
-            "Substitute type",
-            ["similar", "healthier", "cheaper"],
-            format_func=lambda x: {"similar": "🔄 Most Similar", "healthier": "💪 Healthier", "cheaper": "💰 Cheaper"}[x],
-        )
+    product_query = st.text_input(
+        "Search for a product",
+        placeholder="e.g., chocolate cookies, greek yogurt, almond milk",
+        key="sub_search",
+    )
 
-    num_subs = st.slider("Number of substitutes", 3, 10, 5)
-
-    if st.button("Find Substitutes", type="primary", use_container_width=True):
-        with st.spinner("Finding the best alternatives..."):
+    if st.button("Search Products", type="secondary", use_container_width=True) and product_query:
+        with st.spinner("Searching..."):
             try:
                 response = requests.post(
-                    f"{API_URL}/substitute",
-                    json={
-                        "product_id": int(product_id),
-                        "top_k": num_subs,
-                        "substitute_type": sub_type,
-                    },
-                    timeout=30,
+                    f"{API_URL}/search",
+                    json={"query": product_query, "top_k": 20, "use_reranker": False},
+                    timeout=15,
                 )
-
-                if response.status_code == 404:
-                    st.error(f"Product ID {product_id} not found in catalog.")
-                else:
-                    data = response.json()
-
-                    original = data.get("original_product", {})
-                    st.subheader("Original Product")
-                    render_product_card(original, show_score=False)
-
-                    st.subheader(f"Top {sub_type.title()} Substitutes")
-                    for i, sub in enumerate(data.get("substitutes", []), 1):
-                        render_product_card(sub, rank=i, score_key="similarity_score")
-
+                results = response.json().get("results", [])
+                st.session_state["sub_products"] = results
             except requests.ConnectionError:
-                st.error(
-                    "Cannot connect to API. "
-                    "Start the backend: `uvicorn src.api.main:app --reload`"
-                )
+                st.error("Cannot connect to API.")
+
+    sub_products = st.session_state.get("sub_products", [])
+
+    if sub_products:
+        product_options = {
+            f"{p['product_name']}  —  {p.get('category', '')}  ({p.get('order_count', 0) or 0:,} orders)": p["product_id"]
+            for p in sub_products
+        }
+        selected_label = st.selectbox(
+            "Select a product",
+            options=list(product_options.keys()),
+        )
+        selected_pid = product_options[selected_label]
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            sub_type = st.selectbox(
+                "Substitute type",
+                ["similar", "healthier", "cheaper"],
+                format_func=lambda x: {"similar": "🔄 Most Similar", "healthier": "💪 Healthier", "cheaper": "💰 Cheaper"}[x],
+            )
+        with col2:
+            num_subs = st.slider("Number of substitutes", 3, 10, 5)
+
+        if st.button("Find Substitutes", type="primary", use_container_width=True):
+            with st.spinner("Finding the best alternatives..."):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/substitute",
+                        json={
+                            "product_id": selected_pid,
+                            "top_k": num_subs,
+                            "substitute_type": sub_type,
+                        },
+                        timeout=30,
+                    )
+
+                    if response.status_code == 404:
+                        st.error("Product not found in catalog.")
+                    else:
+                        data = response.json()
+
+                        original = data.get("original_product", {})
+                        st.subheader("Original Product")
+                        render_product_card(original, show_score=False)
+
+                        st.subheader(f"Top {sub_type.title()} Substitutes")
+                        for i, sub in enumerate(data.get("substitutes", []), 1):
+                            render_product_card(sub, rank=i, score_key="similarity_score")
+
+                except requests.ConnectionError:
+                    st.error(
+                        "Cannot connect to API. "
+                        "Start the backend: `uvicorn src.api.main:app --reload`"
+                    )
+    elif product_query:
+        st.info("No products found. Try a different search term.")
 
 # Sidebar with project info
 with st.sidebar:
