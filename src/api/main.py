@@ -19,6 +19,7 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 10
     use_reranker: bool = False
+    attributes: list[str] | None = None  # filter results to only products with ALL of these attributes
 
 
 class SubstituteRequest(BaseModel):
@@ -48,6 +49,8 @@ class ProductResult(BaseModel):
     relevance_score: float | None = None
     similarity_score: float | None = None
     substitution_reasons: list[str] | None = None
+    badges: list[str] | None = None
+    attributes: list[str] | None = None
 
 
 class SearchResponse(BaseModel):
@@ -82,6 +85,8 @@ async def lifespan(app: FastAPI):
 
     from src.search.engine import GrocerySearchEngine
     from src.recommend.substitute import SubstituteRecommender
+    from src.recommend.badges import compute_badges
+    from src.search.attributes import extract_attributes_bulk
 
     logger.info("Initializing search engine...")
     _state["search_engine"] = GrocerySearchEngine(
@@ -92,6 +97,26 @@ async def lifespan(app: FastAPI):
     _state["recommender"] = SubstituteRecommender(
         catalog=catalog, embeddings=embeddings
     )
+
+    logger.info("Computing product badges...")
+    _state["badges"] = compute_badges(catalog)
+    n_with_badges = sum(1 for b in _state["badges"].values() if b)
+    logger.info(f"Badges computed for {n_with_badges} products")
+
+    logger.info("Extracting product attributes...")
+    _state["attributes"] = extract_attributes_bulk(catalog)
+    n_with_attrs = sum(1 for a in _state["attributes"].values() if a)
+    logger.info(f"Attributes extracted for {n_with_attrs} products")
+
+    fbt_path = DATA_DIR / "processed" / "fbt_model.parquet"
+    if fbt_path.exists():
+        from src.recommend.fbt import FrequentlyBoughtTogether
+        logger.info("Loading FBT model...")
+        _state["fbt"] = FrequentlyBoughtTogether().load(fbt_path)
+        logger.info("FBT model loaded")
+    else:
+        logger.info("FBT model not found — skipping. Run scripts/build_fbt.py to enable.")
+        _state["fbt"] = None
 
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
@@ -132,16 +157,29 @@ async def search_products(request: SearchRequest):
     if engine is None:
         raise HTTPException(503, "Search engine not initialized yet")
 
+    fetch_k = request.top_k * 5 if request.attributes else request.top_k
+
     results = engine.search(
         query=request.query,
-        top_k=request.top_k,
+        top_k=fetch_k,
         use_reranker=request.use_reranker,
     )
 
+    cleaned = [_clean_product(r) for r in results]
+
+    if request.attributes:
+        required = set(request.attributes)
+        cleaned = [
+            r for r in cleaned
+            if r.get("attributes") and required.issubset(set(r["attributes"]))
+        ]
+
+    cleaned = cleaned[: request.top_k]
+
     return SearchResponse(
         query=request.query,
-        results=[ProductResult(**_clean_product(r)) for r in results],
-        total_results=len(results),
+        results=[ProductResult(**r) for r in cleaned],
+        total_results=len(cleaned),
     )
 
 
@@ -235,8 +273,48 @@ async def list_categories():
     return {"categories": engine.get_categories()}
 
 
+@app.get("/attributes")
+async def list_attributes():
+    """List all supported attribute filters with human-readable labels."""
+    from src.search.attributes import ALL_ATTRIBUTES, ATTRIBUTE_LABELS
+    return {
+        "attributes": [
+            {"id": a, "label": ATTRIBUTE_LABELS.get(a, a)} for a in ALL_ATTRIBUTES
+        ]
+    }
+
+
+@app.get("/related/{product_id}")
+async def get_related_products(product_id: int, top_k: int = 10):
+    """Frequently bought together — Amazon-style item-item recommendations."""
+    fbt = _state.get("fbt")
+    catalog = _state.get("catalog")
+    if fbt is None:
+        raise HTTPException(503, "FBT model not loaded. Run scripts/build_fbt.py to build it.")
+
+    related = fbt.get_related(product_id, top_k=top_k)
+    if not related:
+        return {"product_id": product_id, "related": []}
+
+    related_ids = [pid for pid, _ in related]
+    scores = {pid: score for pid, score in related}
+    products = catalog[catalog["product_id"].isin(related_ids)]
+
+    rows = []
+    for _, row in products.iterrows():
+        d = _clean_product(row.to_dict())
+        d["similarity_score"] = scores.get(d["product_id"])
+        rows.append(d)
+
+    rows.sort(key=lambda r: r.get("similarity_score") or 0, reverse=True)
+    return {"product_id": product_id, "related": rows}
+
+
 def _clean_product(d: dict) -> dict:
-    """Clean a product dict for JSON serialization (handle NaN values)."""
+    """Clean a product dict for JSON serialization (handle NaN values).
+
+    Also merges in precomputed badges and attributes by product_id.
+    """
     cleaned = {}
     for k, v in d.items():
         if isinstance(v, float) and np.isnan(v):
@@ -247,4 +325,12 @@ def _clean_product(d: dict) -> dict:
             cleaned[k] = float(v)
         else:
             cleaned[k] = v
+
+    pid = cleaned.get("product_id")
+    if pid is not None:
+        badges = _state.get("badges", {}).get(pid, []) or []
+        attrs = _state.get("attributes", {}).get(pid, []) or []
+        cleaned["badges"] = badges if badges else None
+        cleaned["attributes"] = attrs if attrs else None
+
     return cleaned

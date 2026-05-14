@@ -21,6 +21,38 @@ st.caption("AI-Powered Semantic Search & Substitute Recommendation — 49,688 re
 tab1, tab2, tab3 = st.tabs(["🔍 Smart Search", "🔄 Substitute Finder", "🤖 Shopping Assistant"])
 
 
+BADGE_LABELS = {
+    "bestseller": "🏆 Bestseller",
+    "popular": "🔥 Popular",
+    "customer-favorite": "❤️ Customer Favorite",
+    "healthy-choice": "🥗 Healthy Choice",
+    "high-protein": "💪 High Protein",
+    "low-sugar": "🍯 Low Sugar",
+    "low-calorie": "⚖️ Low Calorie",
+    "high-fiber": "🌾 High Fiber",
+}
+
+ATTRIBUTE_LABELS = {
+    "organic": "🌿 Organic",
+    "gluten-free": "🌾 Gluten-Free",
+    "vegan": "🌱 Vegan",
+    "vegetarian": "🥬 Vegetarian",
+    "kosher": "✡️ Kosher",
+    "dairy-free": "🥛 Dairy-Free",
+    "sugar-free": "🍯 Sugar-Free",
+    "keto-friendly": "🥑 Keto",
+    "low-carb": "🥗 Low Carb",
+    "whole-grain": "🌾 Whole Grain",
+    "non-gmo": "🌽 Non-GMO",
+    "high-protein": "💪 High Protein",
+    "low-sugar": "🍯 Low Sugar",
+    "low-calorie": "⚖️ Low Calorie",
+    "low-fat": "🥦 Low Fat",
+    "high-fiber": "🌾 High Fiber",
+    "nut-free": "🥜 Nut-Free",
+}
+
+
 def render_product_card(product, rank=None, show_score=True, score_key="relevance_score"):
     """Render a product as a styled card."""
     name = product.get("product_name", "Unknown")
@@ -28,6 +60,8 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
     department = product.get("department", "")
     brand = product.get("brand", "")
     score = product.get(score_key)
+    badges = product.get("badges") or []
+    attributes = product.get("attributes") or []
 
     # Nutrition info
     cal = product.get("calories_100g")
@@ -75,6 +109,16 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
             if popularity:
                 st.caption(f"📊 {popularity:,} orders")
 
+        # Badges row
+        if badges:
+            badge_text = "  ".join(BADGE_LABELS.get(b, b) for b in badges)
+            st.markdown(f"**{badge_text}**")
+
+        # Attributes row
+        if attributes:
+            attr_text = " · ".join(ATTRIBUTE_LABELS.get(a, a) for a in attributes)
+            st.caption(attr_text)
+
         # Substitution reasons
         reasons = product.get("substitution_reasons", [])
         if reasons:
@@ -95,6 +139,13 @@ with tab1:
     with col3:
         use_reranker = st.checkbox("AI Reranking (cross-encoder)", value=False)
 
+    selected_attrs = st.multiselect(
+        "Filter by attributes",
+        options=list(ATTRIBUTE_LABELS.keys()),
+        format_func=lambda a: ATTRIBUTE_LABELS.get(a, a),
+        help="Show only products matching ALL selected attributes",
+    )
+
     if st.button("Search", type="primary", use_container_width=True) and query:
         with st.spinner("Searching across 49,688 products..."):
             try:
@@ -104,6 +155,7 @@ with tab1:
                         "query": query,
                         "top_k": top_k,
                         "use_reranker": use_reranker,
+                        "attributes": selected_attrs if selected_attrs else None,
                     },
                     timeout=30,
                 )
@@ -192,6 +244,33 @@ with tab2:
                         st.subheader(f"Top {sub_type.title()} Substitutes")
                         for i, sub in enumerate(data.get("substitutes", []), 1):
                             render_product_card(sub, rank=i, score_key="similarity_score")
+
+                        # Frequently Bought Together (Amazon-style)
+                        try:
+                            fbt_response = requests.get(
+                                f"{API_URL}/related/{selected_pid}",
+                                params={"top_k": 5},
+                                timeout=10,
+                            )
+                            if fbt_response.status_code == 200:
+                                fbt_data = fbt_response.json()
+                                related = fbt_data.get("related", [])
+                                if related:
+                                    st.subheader("Frequently Bought Together")
+                                    st.caption(
+                                        "Other shoppers who bought this also bought "
+                                        "(from real Instacart order history)"
+                                    )
+                                    for i, item in enumerate(related, 1):
+                                        render_product_card(item, rank=i, score_key="similarity_score")
+                            elif fbt_response.status_code == 503:
+                                st.info(
+                                    "💡 FBT model not loaded. "
+                                    "Run `python3 scripts/build_fbt.py` to enable "
+                                    "Frequently Bought Together recommendations."
+                                )
+                        except requests.RequestException:
+                            pass  # FBT is optional — silently skip
 
                 except requests.ConnectionError:
                     st.error(
