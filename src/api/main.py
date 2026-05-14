@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from loguru import logger
 
+from src.models.llm import answer_question
+
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 
@@ -24,6 +26,11 @@ class SubstituteRequest(BaseModel):
     top_k: int = 5
     same_category: bool = True
     substitute_type: str = "similar"  # "similar", "healthier", "cheaper"
+
+
+class QARequest(BaseModel):
+    question: str
+    top_k: int = 5  # how many products to retrieve as context
 
 
 class ProductResult(BaseModel):
@@ -52,6 +59,13 @@ class SearchResponse(BaseModel):
 class SubstituteResponse(BaseModel):
     original_product: ProductResult
     substitutes: list[ProductResult]
+
+
+class QAResponse(BaseModel):
+    question: str
+    answer: str
+    referenced_products: list[ProductResult]
+    model: str
 
 
 # Global engine instances
@@ -163,6 +177,34 @@ async def get_substitutes(request: SubstituteRequest):
     return SubstituteResponse(
         original_product=ProductResult(**_clean_product(original_dict)),
         substitutes=[ProductResult(**_clean_product(s)) for s in subs],
+    )
+
+
+@app.post("/qa", response_model=QAResponse)
+async def shopping_qa(request: QARequest):
+    """Answer shopping questions grounded in the product catalog (RAG)."""
+    engine = _state.get("search_engine")
+    if engine is None:
+        raise HTTPException(503, "Search engine not initialized yet")
+
+    results = engine.search(
+        query=request.question,
+        top_k=request.top_k,
+        use_reranker=False,
+    )
+
+    cleaned_products = [_clean_product(r) for r in results]
+
+    try:
+        llm_result = answer_question(request.question, cleaned_products)
+    except Exception as e:
+        raise HTTPException(500, f"LLM error: {str(e)}")
+
+    return QAResponse(
+        question=request.question,
+        answer=llm_result["answer"],
+        referenced_products=[ProductResult(**p) for p in cleaned_products],
+        model=llm_result["model"],
     )
 
 

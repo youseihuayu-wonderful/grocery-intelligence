@@ -145,3 +145,85 @@ def generate_substitute_explanation(
     )
 
     return response.choices[0].message.content
+
+
+def answer_question(
+    question: str,
+    products: list[dict],
+    client: OpenAI | None = None,
+) -> dict:
+    """RAG-style Q&A grounded in retrieved product catalog.
+
+    Args:
+        question: User's natural language question (e.g. "What can I use
+            instead of heavy cream?")
+        products: Top-K relevant products retrieved by the search engine.
+            Each dict has keys like product_name, category, department,
+            brand, calories_100g, protein_100g, sugar_100g, nutrition_grade.
+
+    Returns:
+        {
+            "answer": str,         # 2-4 sentence answer grounded in products
+            "model": str,          # which model was used (e.g. "gpt-4o-mini")
+        }
+    """
+    if client is None:
+        client = get_client()
+
+    model = "gpt-4o-mini"
+
+    product_lines = []
+    for p in products[:8]:
+        attrs = []
+        if p.get("brand"):
+            attrs.append(f"brand: {p['brand']}")
+        if p.get("category"):
+            attrs.append(f"category: {p['category']}")
+        if p.get("department"):
+            attrs.append(f"department: {p['department']}")
+        if p.get("calories_100g") is not None:
+            attrs.append(f"{p['calories_100g']} cal/100g")
+        if p.get("protein_100g") is not None:
+            attrs.append(f"protein: {p['protein_100g']}g/100g")
+        if p.get("sugar_100g") is not None:
+            attrs.append(f"sugar: {p['sugar_100g']}g/100g")
+        if p.get("nutrition_grade"):
+            attrs.append(f"grade: {p['nutrition_grade']}")
+        name = p.get("product_name", "Unknown")
+        if attrs:
+            product_lines.append(f"- {name} ({', '.join(attrs)})")
+        else:
+            product_lines.append(f"- {name}")
+
+    product_context = (
+        "\n".join(product_lines) if product_lines else "(no products available)"
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful grocery shopping assistant. "
+                    "Answer the user's question using ONLY the provided "
+                    "products as evidence. Cite specific product names from "
+                    "the list. Be concise (2-4 sentences). If the products "
+                    "do not actually answer the question, respond with "
+                    '"I don\'t have enough information".'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Available products:\n{product_context}"
+                ),
+            },
+        ],
+        temperature=0.3,
+    )
+
+    answer = response.choices[0].message.content
+    logger.info(f"Q&A: '{question}' -> '{answer}'")
+    return {"answer": answer, "model": model}

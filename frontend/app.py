@@ -18,7 +18,7 @@ st.set_page_config(
 st.title("🛒 Grocery Intelligence")
 st.caption("AI-Powered Semantic Search & Substitute Recommendation — 49,688 real products")
 
-tab1, tab2 = st.tabs(["🔍 Smart Search", "🔄 Substitute Finder"])
+tab1, tab2, tab3 = st.tabs(["🔍 Smart Search", "🔄 Substitute Finder", "🤖 Shopping Assistant"])
 
 
 def render_product_card(product, rank=None, show_score=True, score_key="relevance_score"):
@@ -200,6 +200,59 @@ with tab2:
                     )
     elif product_query:
         st.info("No products found. Try a different search term.")
+
+with tab3:
+    st.markdown(
+        "Ask shopping questions in natural language — answers are grounded in the product catalog "
+        "using retrieval-augmented generation (RAG)."
+    )
+
+    question = st.text_area(
+        "Your question",
+        placeholder="e.g., What can I use instead of heavy cream?",
+        key="qa_question",
+    )
+
+    qa_top_k = st.slider("Products to ground the answer", 3, 10, 5, key="qa_top_k")
+
+    if st.button("Ask", type="primary", use_container_width=True, key="qa_ask") and question:
+        with st.spinner("Thinking..."):
+            try:
+                response = requests.post(
+                    f"{API_URL}/qa",
+                    json={"question": question, "top_k": qa_top_k},
+                    timeout=60,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+
+                    st.info(data.get("answer", ""))
+
+                    model_name = data.get("model", "")
+                    if model_name:
+                        st.caption(f"Powered by {model_name}")
+
+                    referenced = data.get("referenced_products", [])
+                    if referenced:
+                        st.subheader("Referenced Products")
+                        for i, product in enumerate(referenced, 1):
+                            render_product_card(product, rank=i, show_score=False)
+                else:
+                    try:
+                        err = response.json()
+                        message = err.get("detail") or err.get("message") or response.text
+                    except Exception:
+                        message = response.text
+                    st.error(f"Error from server: {message}")
+
+            except requests.ConnectionError:
+                st.error(
+                    "Cannot connect to API. "
+                    "Start the backend: `uvicorn src.api.main:app --reload`"
+                )
+            except requests.Timeout:
+                st.warning("Request timed out. Try a simpler question.")
 
 # Sidebar with project info
 with st.sidebar:
