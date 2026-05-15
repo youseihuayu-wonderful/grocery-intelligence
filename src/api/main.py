@@ -77,6 +77,7 @@ class SearchResponse(BaseModel):
     query: str
     results: list[ProductResult]
     total_results: int
+    corrected_query: str | None = None  # populated if spelling correction changed the query
 
 
 class SubstituteResponse(BaseModel):
@@ -181,6 +182,42 @@ async def lifespan(app: FastAPI):
     else:
         _state["experiments"] = None
 
+    from src.search.query_understanding import (
+        QueryVocabulary, SpellingCorrector, AutocompleteSuggester,
+    )
+    logger.info("Building query understanding vocabulary...")
+    _state["vocab"] = QueryVocabulary(catalog)
+    _state["spelling"] = SpellingCorrector(_state["vocab"])
+    _state["autocomplete"] = AutocompleteSuggester(_state["vocab"])
+    logger.info(
+        f"Vocab built: {len(_state['vocab'].unigrams):,} unigrams, "
+        f"{len(_state['vocab'].full_names):,} full names"
+    )
+
+    ann_flat_path = DATA_DIR / "embeddings" / "ann_flat" / "index.faiss"
+    if ann_flat_path.exists():
+        from src.search.ann_index import ANNIndex
+        try:
+            _state["ann_index"] = ANNIndex.load(ann_flat_path.parent)
+            logger.info(f"FAISS ANN index loaded ({len(_state['ann_index']):,} vectors)")
+        except Exception as e:
+            logger.warning(f"FAISS index load failed: {e}")
+            _state["ann_index"] = None
+    else:
+        _state["ann_index"] = None
+
+    ltr_behavioral_path = Path(__file__).parent.parent.parent / "models" / "ltr_behavioral.xgb"
+    if ltr_behavioral_path.exists():
+        from src.models.ltr import LTRModel
+        try:
+            _state["ltr_behavioral"] = LTRModel(ltr_behavioral_path)
+            logger.info(f"Behavioral LTR model loaded from {ltr_behavioral_path.name}")
+        except Exception as e:
+            logger.warning(f"Behavioral LTR load failed: {e}")
+            _state["ltr_behavioral"] = None
+    else:
+        _state["ltr_behavioral"] = None
+
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
     yield
@@ -218,15 +255,27 @@ async def search_products(request: SearchRequest):
     """Search for grocery products using hybrid semantic + keyword search.
 
     Final ranking blends relevance + popularity + (optional) personalization.
+    Applies spelling correction transparently — if the corrected query has
+    enough vocabulary support to differ from the input, we search the
+    corrected version and return the suggestion alongside results.
     """
     engine = _state.get("search_engine")
     if engine is None:
         raise HTTPException(503, "Search engine not initialized yet")
 
+    spelling = _state.get("spelling")
+    effective_query = request.query
+    corrected_query = None
+    if spelling is not None:
+        candidate = spelling.correct(request.query)
+        if candidate and candidate != request.query:
+            corrected_query = candidate
+            effective_query = candidate
+
     fetch_k = max(request.top_k * 5, 50)
 
     results = engine.search(
-        query=request.query,
+        query=effective_query,
         top_k=fetch_k,
         use_reranker=request.use_reranker,
     )
@@ -273,6 +322,7 @@ async def search_products(request: SearchRequest):
         query=request.query,
         results=[ProductResult(**r) for r in cleaned],
         total_results=len(cleaned),
+        corrected_query=corrected_query,
     )
 
 
@@ -374,6 +424,33 @@ async def list_attributes():
         "attributes": [
             {"id": a, "label": ATTRIBUTE_LABELS.get(a, a)} for a in ALL_ATTRIBUTES
         ]
+    }
+
+
+@app.get("/suggest")
+async def suggest_query(prefix: str = "", top_k: int = Query(default=8, le=20)):
+    """Autocomplete suggestions for a query prefix.
+
+    Returns up to top_k suggestion objects: {"text", "type", "score"}.
+    Empty prefix returns popular categories.
+    """
+    autocomplete = _state.get("autocomplete")
+    if autocomplete is None:
+        return {"suggestions": []}
+    return {"suggestions": autocomplete.suggest(prefix, top_k=top_k)}
+
+
+@app.get("/correct")
+async def correct_query(query: str):
+    """Spelling correction for a query. Returns the corrected version
+    plus a few alternative options for a 'did you mean?' UI."""
+    spelling = _state.get("spelling")
+    if spelling is None:
+        return {"query": query, "corrected": query, "alternatives": []}
+    return {
+        "query": query,
+        "corrected": spelling.correct(query),
+        "alternatives": spelling.suggest_corrections(query, top_k=3),
     }
 
 

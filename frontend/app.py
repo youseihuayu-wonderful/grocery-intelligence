@@ -239,6 +239,19 @@ with tab1:
         placeholder="e.g., low-sugar yogurt, organic almond milk, Korean BBQ ingredients",
     )
 
+    if query and len(query) >= 2:
+        try:
+            sug_response = requests.get(
+                f"{API_URL}/suggest", params={"prefix": query, "top_k": 6}, timeout=2,
+            )
+            if sug_response.status_code == 200:
+                suggestions = sug_response.json().get("suggestions", [])
+                if suggestions:
+                    pretty = " · ".join(s.get("text", "") for s in suggestions[:6])
+                    st.caption(f"💡 Suggestions: {pretty}")
+        except requests.RequestException:
+            pass
+
     col1, col2, col3 = st.columns([2, 1, 1])
     with col2:
         top_k = st.slider("Results", 5, 20, 10)
@@ -268,7 +281,14 @@ with tab1:
                 )
                 data = response.json()
 
-                st.subheader(f"Results for \"{query}\" ({data.get('total_results', 0)} found)")
+                corrected = data.get("corrected_query")
+                if corrected and corrected != query:
+                    st.info(
+                        f"🔤 Searching for **{corrected}** instead of \"{query}\" "
+                        "(auto-corrected)."
+                    )
+
+                st.subheader(f"Results for \"{corrected or query}\" ({data.get('total_results', 0)} found)")
 
                 for i, product in enumerate(data.get("results", []), 1):
                     render_product_card(product, rank=i)
