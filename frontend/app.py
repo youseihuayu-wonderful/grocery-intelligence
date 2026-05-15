@@ -18,7 +18,34 @@ st.set_page_config(
 st.title("🛒 Grocery Intelligence")
 st.caption("AI-Powered Semantic Search & Substitute Recommendation — 49,688 real products")
 
-tab1, tab2, tab3 = st.tabs(["🔍 Smart Search", "🔄 Substitute Finder", "🤖 Shopping Assistant"])
+
+@st.cache_data(ttl=600)
+def fetch_demo_users():
+    try:
+        r = requests.get(f"{API_URL}/users/demo", params={"n": 20}, timeout=5)
+        return r.json().get("users", [])
+    except requests.RequestException:
+        return []
+
+
+_demo_users = fetch_demo_users()
+_user_options = {"Guest (no personalization)": None}
+for u in _demo_users:
+    label = u.get("summary") or f"User {u['user_id']} — {u.get('total_orders', 0)} orders"
+    _user_options[label] = u["user_id"]
+
+_selected_label = st.selectbox(
+    "Sign in as a demo user",
+    options=list(_user_options.keys()),
+    help="Search results, badges, and the Home feed personalize to the selected user's order history.",
+)
+ACTIVE_USER_ID = _user_options[_selected_label]
+if ACTIVE_USER_ID is not None:
+    st.caption(f"✨ Personalization active for User {ACTIVE_USER_ID}")
+
+tab0, tab1, tab2, tab3 = st.tabs(
+    ["🏠 Home", "🔍 Smart Search", "🔄 Substitute Finder", "🤖 Shopping Assistant"]
+)
 
 
 BADGE_LABELS = {
@@ -104,10 +131,12 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
                 st.caption(f"Nutri-Score: {grade_colors.get(grade, '⚪')} {grade.upper()}")
 
         with cols[3]:
-            if show_score and score is not None:
-                st.metric("Score", f"{score:.3f}")
             if popularity:
-                st.caption(f"📊 {popularity:,} orders")
+                st.markdown(f"**📊 {popularity:,}**")
+                st.caption("orders")
+            personalization = product.get("personalization_score")
+            if personalization and personalization > 0.2:
+                st.caption(f"🎯 Match: {int(personalization * 100)}%")
 
         # Badges row
         if badges:
@@ -123,6 +152,72 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
         reasons = product.get("substitution_reasons", [])
         if reasons:
             st.success(" · ".join(f"✓ {r}" for r in reasons))
+
+
+with tab0:
+    st.markdown("Discovery feeds — no query needed. Bestsellers, healthy picks, and personalized recommendations.")
+
+    @st.cache_data(ttl=300)
+    def fetch_departments():
+        try:
+            r = requests.get(f"{API_URL}/departments", timeout=5)
+            return r.json().get("departments", [])
+        except requests.RequestException:
+            return []
+
+    def _fetch_feed(feed_type, user_id=None, department=None, top_k=8):
+        params = {"top_k": top_k}
+        if user_id is not None:
+            params["user_id"] = user_id
+        if department is not None:
+            params["department"] = department
+        try:
+            r = requests.get(f"{API_URL}/feed/{feed_type}", params=params, timeout=15)
+            if r.status_code == 200:
+                return r.json().get("products", [])
+        except requests.RequestException:
+            pass
+        return []
+
+    if ACTIVE_USER_ID is not None:
+        st.subheader("✨ For You")
+        st.caption(f"Personalized based on User {ACTIVE_USER_ID}'s order history")
+        for_you_products = _fetch_feed("for-you", user_id=ACTIVE_USER_ID, top_k=6)
+        if for_you_products:
+            for i, p in enumerate(for_you_products, 1):
+                render_product_card(p, rank=i, show_score=False)
+        else:
+            st.info("No personalized recommendations available yet.")
+        st.markdown("---")
+    else:
+        st.info("💡 Sign in as a demo user above to see a personalized For-You feed.")
+
+    st.subheader("🏆 Bestsellers")
+    st.caption("Top products by total order count across all users")
+    bestsellers = _fetch_feed("bestsellers", top_k=6)
+    for i, p in enumerate(bestsellers, 1):
+        render_product_card(p, rank=i, show_score=False)
+    st.markdown("---")
+
+    st.subheader("🥗 Healthy Picks")
+    st.caption("Top-rated products with Nutri-Score A or B")
+    healthy = _fetch_feed("healthy-picks", top_k=6)
+    for i, p in enumerate(healthy, 1):
+        render_product_card(p, rank=i, show_score=False)
+    st.markdown("---")
+
+    departments = fetch_departments()
+    if departments:
+        st.subheader("🏬 Browse by Department")
+        default_dept = "produce" if "produce" in departments else departments[0]
+        selected_dept = st.selectbox(
+            "Department",
+            options=departments,
+            index=departments.index(default_dept),
+        )
+        dept_products = _fetch_feed("department", department=selected_dept, top_k=6)
+        for i, p in enumerate(dept_products, 1):
+            render_product_card(p, rank=i, show_score=False)
 
 
 with tab1:
@@ -156,6 +251,7 @@ with tab1:
                         "top_k": top_k,
                         "use_reranker": use_reranker,
                         "attributes": selected_attrs if selected_attrs else None,
+                        "user_id": ACTIVE_USER_ID,
                     },
                     timeout=30,
                 )

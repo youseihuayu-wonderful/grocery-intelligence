@@ -38,3 +38,9 @@ Thumbs.db
 
 # ChromaDB local storage
 chroma_db/
+
+# Behavioral event log (SQLite)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

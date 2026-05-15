@@ -20,6 +20,21 @@ class SearchRequest(BaseModel):
     top_k: int = 10
     use_reranker: bool = False
     attributes: list[str] | None = None  # filter results to only products with ALL of these attributes
+    user_id: int | None = None  # personalize ranking if user has a profile
+
+
+class EventRequest(BaseModel):
+    product_id: int
+    event_type: str  # "view" | "click" | "add_to_cart" | "purchase"
+    user_id: int | None = None
+    query: str | None = None
+    position: int | None = None
+
+
+class FeedResponse(BaseModel):
+    feed_type: str
+    products: list["ProductResult"]
+    user_id: int | None = None
 
 
 class SubstituteRequest(BaseModel):
@@ -51,6 +66,9 @@ class ProductResult(BaseModel):
     substitution_reasons: list[str] | None = None
     badges: list[str] | None = None
     attributes: list[str] | None = None
+    personalization_score: float | None = None
+    final_score: float | None = None
+    feed_score: float | None = None
 
 
 class SearchResponse(BaseModel):
@@ -118,6 +136,27 @@ async def lifespan(app: FastAPI):
         logger.info("FBT model not found — skipping. Run scripts/build_fbt.py to enable.")
         _state["fbt"] = None
 
+    profiles_path = DATA_DIR / "processed" / "user_profiles.parquet"
+    if profiles_path.exists():
+        from src.recommend.personalization import UserPersonalizationStore
+        logger.info("Loading user personalization store...")
+        _state["personalization"] = UserPersonalizationStore.load(profiles_path)
+        logger.info(f"Loaded {len(_state['personalization'].profiles)} user profiles")
+    else:
+        logger.info("User profiles not found — skipping. Run scripts/build_user_profiles.py to enable.")
+        _state["personalization"] = None
+
+    behavior_path = DATA_DIR / "processed" / "behavior.db"
+    if behavior_path.exists():
+        from src.recommend.behavior import BehaviorLogger
+        logger.info("Connecting to behavior log...")
+        _state["behavior"] = BehaviorLogger(behavior_path)
+        logger.info(f"Behavior log connected ({_state['behavior'].count_events():,} events)")
+    else:
+        from src.recommend.behavior import BehaviorLogger
+        logger.info("Behavior log will be created on first event.")
+        _state["behavior"] = BehaviorLogger(behavior_path)
+
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
     yield
@@ -152,12 +191,15 @@ async def health_check():
 
 @app.post("/search", response_model=SearchResponse)
 async def search_products(request: SearchRequest):
-    """Search for grocery products using hybrid semantic + keyword search."""
+    """Search for grocery products using hybrid semantic + keyword search.
+
+    Final ranking blends relevance + popularity + (optional) personalization.
+    """
     engine = _state.get("search_engine")
     if engine is None:
         raise HTTPException(503, "Search engine not initialized yet")
 
-    fetch_k = request.top_k * 5 if request.attributes else request.top_k
+    fetch_k = max(request.top_k * 5, 50)
 
     results = engine.search(
         query=request.query,
@@ -173,6 +215,16 @@ async def search_products(request: SearchRequest):
             r for r in cleaned
             if r.get("attributes") and required.issubset(set(r["attributes"]))
         ]
+
+    from src.recommend.personalization import rerank_with_personalization
+    store = _state.get("personalization")
+    cleaned = rerank_with_personalization(
+        cleaned,
+        user_id=request.user_id,
+        store=store,
+        alpha=0.30 if request.user_id else 0.0,
+        popularity_weight=0.25,
+    )
 
     cleaned = cleaned[: request.top_k]
 
@@ -282,6 +334,111 @@ async def list_attributes():
             {"id": a, "label": ATTRIBUTE_LABELS.get(a, a)} for a in ALL_ATTRIBUTES
         ]
     }
+
+
+@app.get("/users/demo")
+async def list_demo_users(n: int = Query(default=20, le=100)):
+    """List demo users spanning the order-count distribution.
+
+    Returns users the frontend can show in a 'Sign in as ...' dropdown.
+    """
+    store = _state.get("personalization")
+    if store is None:
+        return {"users": []}
+    return {"users": store.list_demo_users(n=n)}
+
+
+@app.get("/users/{user_id}/profile")
+async def get_user_profile(user_id: int):
+    """Return a user's profile (favorite categories, departments, brands, top products)."""
+    store = _state.get("personalization")
+    if store is None:
+        raise HTTPException(503, "Personalization not loaded")
+    profile = store.get_profile(user_id)
+    if profile is None:
+        raise HTTPException(404, f"User {user_id} not in profile store")
+    return {
+        "user_id": profile.user_id,
+        "total_orders": profile.total_orders,
+        "avg_basket_size": profile.avg_basket_size,
+        "favorite_products": profile.favorite_products[:10],
+        "favorite_categories": dict(list(profile.favorite_categories.items())[:5]),
+        "favorite_departments": dict(list(profile.favorite_departments.items())[:5]),
+        "favorite_brands": dict(list(profile.favorite_brands.items())[:5]),
+    }
+
+
+@app.get("/feed/{feed_type}", response_model=FeedResponse)
+async def get_feed(
+    feed_type: str,
+    top_k: int = Query(default=20, le=50),
+    user_id: int | None = None,
+    department: str | None = None,
+):
+    """Get a discovery feed (no query needed).
+
+    feed_type: one of 'bestsellers', 'healthy-picks', 'for-you', 'department'
+    """
+    catalog = _state.get("catalog")
+    if catalog is None:
+        raise HTTPException(503, "Catalog not loaded")
+
+    from src.recommend.feed import (
+        get_bestsellers, get_healthy_picks, get_for_you, get_trending_in_department
+    )
+
+    if feed_type == "bestsellers":
+        products = get_bestsellers(catalog, top_k=top_k)
+    elif feed_type == "healthy-picks":
+        products = get_healthy_picks(catalog, top_k=top_k)
+    elif feed_type == "for-you":
+        store = _state.get("personalization")
+        if store is None or user_id is None:
+            products = get_bestsellers(catalog, top_k=top_k)
+        else:
+            products = get_for_you(catalog, store, user_id, top_k=top_k)
+    elif feed_type == "department":
+        if not department:
+            raise HTTPException(400, "department query param required for 'department' feed")
+        products = get_trending_in_department(catalog, department, top_k=top_k)
+    else:
+        raise HTTPException(400, f"Unknown feed type: {feed_type}")
+
+    cleaned = [_clean_product(p) for p in products]
+    return FeedResponse(
+        feed_type=feed_type,
+        products=[ProductResult(**c) for c in cleaned],
+        user_id=user_id,
+    )
+
+
+@app.get("/departments")
+async def list_departments_endpoint():
+    """List departments sorted by total order_count."""
+    catalog = _state.get("catalog")
+    if catalog is None:
+        raise HTTPException(503, "Catalog not loaded")
+    from src.recommend.feed import list_departments
+    return {"departments": list_departments(catalog)}
+
+
+@app.post("/events")
+async def log_event(request: EventRequest):
+    """Log a user behavioral event (view/click/add_to_cart/purchase)."""
+    behavior = _state.get("behavior")
+    if behavior is None:
+        raise HTTPException(503, "Behavior logger not initialized")
+    try:
+        event_id = behavior.log_event(
+            product_id=request.product_id,
+            event_type=request.event_type,
+            user_id=request.user_id,
+            query=request.query,
+            position=request.position,
+        )
+        return {"event_id": event_id, "status": "logged"}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/related/{product_id}")
