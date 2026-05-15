@@ -69,6 +69,8 @@ class ProductResult(BaseModel):
     personalization_score: float | None = None
     final_score: float | None = None
     feed_score: float | None = None
+    emoji: str | None = None
+    image_url: str | None = None
 
 
 class SearchResponse(BaseModel):
@@ -157,6 +159,28 @@ async def lifespan(app: FastAPI):
         logger.info("Behavior log will be created on first event.")
         _state["behavior"] = BehaviorLogger(behavior_path)
 
+    from src.recommend.images import build_emoji_map
+    logger.info("Building product emoji map...")
+    _state["emoji_map"] = build_emoji_map(catalog)
+    logger.info(f"Emoji map built for {len(_state['emoji_map'])} products")
+
+    images_path = DATA_DIR / "processed" / "product_images.parquet"
+    if images_path.exists():
+        images_df = pd.read_parquet(images_path)
+        _state["image_map"] = dict(zip(images_df["product_id"], images_df["image_url"]))
+        logger.info(f"Loaded {len(_state['image_map'])} OFF product images")
+    else:
+        _state["image_map"] = {}
+
+    experiments_path = Path(__file__).parent.parent.parent / "experiments" / "ranking_v1.yaml"
+    if experiments_path.exists():
+        from src.experiments.ab_testing import ExperimentRegistry
+        _state["experiments"] = ExperimentRegistry.load(experiments_path)
+        active = _state["experiments"].list_active()
+        logger.info(f"Loaded experiments: {[e.name for e in active]}")
+    else:
+        _state["experiments"] = None
+
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
     yield
@@ -217,13 +241,30 @@ async def search_products(request: SearchRequest):
         ]
 
     from src.recommend.personalization import rerank_with_personalization
+    from src.experiments.ab_testing import get_variant_config
     store = _state.get("personalization")
+
+    default_cfg = {
+        "alpha": 0.30 if request.user_id else 0.0,
+        "popularity_weight": 0.25,
+    }
+    registry = _state.get("experiments")
+    if registry is not None:
+        variant_name, variant_cfg = get_variant_config(
+            registry,
+            experiment_name="ranking_v1",
+            user_id=request.user_id,
+            default_config=default_cfg,
+        )
+    else:
+        variant_name, variant_cfg = "control", default_cfg
+
     cleaned = rerank_with_personalization(
         cleaned,
         user_id=request.user_id,
         store=store,
-        alpha=0.30 if request.user_id else 0.0,
-        popularity_weight=0.25,
+        alpha=variant_cfg.get("alpha", default_cfg["alpha"]),
+        popularity_weight=variant_cfg.get("popularity_weight", default_cfg["popularity_weight"]),
     )
 
     cleaned = cleaned[: request.top_k]
@@ -422,6 +463,91 @@ async def list_departments_endpoint():
     return {"departments": list_departments(catalog)}
 
 
+@app.get("/experiments")
+async def list_experiments(user_id: int | None = None):
+    """List active A/B experiments + (optionally) which variant a user is in."""
+    registry = _state.get("experiments")
+    if registry is None:
+        return {"experiments": []}
+
+    from src.experiments.ab_testing import assign_variant
+    output = []
+    for exp in registry.list_active():
+        item = {
+            "name": exp.name,
+            "description": exp.description,
+            "variants": [
+                {"name": v.name, "traffic_weight": v.traffic_weight, "config": v.config}
+                for v in exp.variants
+            ],
+        }
+        if user_id is not None:
+            variant = assign_variant(exp, user_id)
+            item["assigned_variant"] = variant.name
+            item["assigned_config"] = variant.config
+        output.append(item)
+    return {"experiments": output}
+
+
+@app.get("/experiments/{experiment_name}/metrics")
+async def experiment_metrics(
+    experiment_name: str,
+    sample_users: int = Query(default=500, le=5000),
+):
+    """Compute per-variant metrics for an experiment from the behavior log.
+
+    Samples `sample_users` random user_ids from the behavior log,
+    assigns them to variants, then aggregates events per variant.
+    """
+    registry = _state.get("experiments")
+    behavior = _state.get("behavior")
+    if registry is None:
+        raise HTTPException(404, "Experiments not loaded")
+    if behavior is None:
+        raise HTTPException(503, "Behavior log not initialized")
+
+    experiment = registry.get(experiment_name)
+    if experiment is None:
+        raise HTTPException(404, f"Experiment {experiment_name} not found")
+
+    from src.experiments.ab_testing import assign_variant
+    from src.evaluation.online_metrics import compute_variant_metrics
+    import sqlite3
+
+    conn = sqlite3.connect(behavior.db_path) if hasattr(behavior, "db_path") else None
+    user_ids = []
+    try:
+        if conn:
+            rows = conn.execute(
+                "SELECT DISTINCT user_id FROM events WHERE user_id IS NOT NULL "
+                f"ORDER BY RANDOM() LIMIT {int(sample_users)}"
+            ).fetchall()
+            user_ids = [r[0] for r in rows]
+    finally:
+        if conn:
+            conn.close()
+
+    user_variant_map = {uid: assign_variant(experiment, uid).name for uid in user_ids}
+    metrics = compute_variant_metrics(behavior, user_variant_map)
+    return {
+        "experiment": experiment_name,
+        "sample_size": len(user_ids),
+        "variants": {
+            name: {
+                "n_users": vm.n_users,
+                "n_views": vm.n_views,
+                "n_clicks": vm.n_clicks,
+                "n_purchases": vm.n_purchases,
+                "ctr": vm.ctr,
+                "conversion_rate": vm.conversion_rate,
+                "mrr_at_10": vm.mrr_at_10,
+                "avg_click_position": vm.avg_click_position,
+            }
+            for name, vm in metrics.items()
+        },
+    }
+
+
 @app.post("/events")
 async def log_event(request: EventRequest):
     """Log a user behavioral event (view/click/add_to_cart/purchase)."""
@@ -489,5 +615,7 @@ def _clean_product(d: dict) -> dict:
         attrs = _state.get("attributes", {}).get(pid, []) or []
         cleaned["badges"] = badges if badges else None
         cleaned["attributes"] = attrs if attrs else None
+        cleaned["emoji"] = _state.get("emoji_map", {}).get(pid)
+        cleaned["image_url"] = _state.get("image_map", {}).get(pid)
 
     return cleaned

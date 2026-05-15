@@ -1,0 +1,27 @@
+experiments:
+  - name: ranking_v1
+    description: "Test whether bumping popularity weight from 0.15 to 0.35 improves engagement"
+    enabled: true
+    variants:
+      - name: control
+        traffic_weight: 0.5
+        config:
+          alpha: 0.30              # personalization weight
+          popularity_weight: 0.15  # original
+      - name: popularity-boost
+        traffic_weight: 0.5
+        config:
+          alpha: 0.30
+          popularity_weight: 0.35  # bumped
+  - name: query_rewrite_v1
+    description: "Test whether LLM query rewriting improves results"
+    enabled: false
+    variants:
+      - name: control
+        traffic_weight: 0.5
+        config:
+          use_llm_rewrite: false
+      - name: llm-rewrite
+        traffic_weight: 0.5
+        config:
+          use_llm_rewrite: true

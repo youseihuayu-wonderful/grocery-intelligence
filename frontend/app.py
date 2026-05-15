@@ -98,11 +98,22 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
     popularity = product.get("order_count")
     reorder = product.get("reorder_rate")
 
-    with st.container(border=True):
-        cols = st.columns([0.5, 4, 2, 1.5])
+    emoji = product.get("emoji", "📦")
+    image_url = product.get("image_url")
 
-        if rank is not None:
-            cols[0].markdown(f"### #{rank}")
+    with st.container(border=True):
+        cols = st.columns([0.7, 4, 2, 1.5])
+
+        with cols[0]:
+            if image_url:
+                st.image(image_url, width=70)
+            else:
+                st.markdown(
+                    f"<div style='font-size:48px; line-height:1; text-align:center; padding-top:6px'>{emoji}</div>",
+                    unsafe_allow_html=True,
+                )
+            if rank is not None:
+                st.caption(f"#{rank}")
 
         with cols[1]:
             st.markdown(f"**{name}**")
@@ -431,6 +442,30 @@ with tab3:
 
 # Sidebar with project info
 with st.sidebar:
+    st.markdown("### 🧪 A/B Experiments")
+    try:
+        exp_response = requests.get(
+            f"{API_URL}/experiments",
+            params={"user_id": ACTIVE_USER_ID} if ACTIVE_USER_ID else {},
+            timeout=2,
+        )
+        if exp_response.status_code == 200:
+            experiments_data = exp_response.json().get("experiments", [])
+            if experiments_data:
+                for exp in experiments_data:
+                    variant = exp.get("assigned_variant", "—")
+                    st.markdown(f"**{exp['name']}**")
+                    st.caption(exp["description"])
+                    if ACTIVE_USER_ID:
+                        st.success(f"Variant: `{variant}`")
+                    else:
+                        st.caption("(sign in to see your variant)")
+            else:
+                st.caption("No active experiments")
+    except Exception:
+        st.caption("Experiments unavailable")
+
+    st.markdown("---")
     st.markdown("### About")
     st.markdown(
         "**Grocery Intelligence** uses hybrid search "
