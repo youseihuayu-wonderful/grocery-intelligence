@@ -231,11 +231,57 @@ with tab0:
             render_product_card(p, rank=i, show_score=False)
 
 
+POPULAR_SEARCHES = [
+    ("🍌", "banana"),
+    ("🥛", "milk"),
+    ("🥚", "eggs"),
+    ("🍞", "bread"),
+    ("🍦", "yogurt"),
+    ("🍗", "chicken"),
+    ("🥑", "avocado"),
+    ("☕", "coffee"),
+    ("🧀", "cheese"),
+    ("🍫", "chocolate"),
+    ("🍅", "tomato"),
+    ("🥬", "lettuce"),
+    ("🥦", "broccoli"),
+    ("🧅", "onion"),
+    ("🥩", "beef"),
+    ("🍓", "strawberry"),
+    ("🥗", "salad"),
+    ("🍝", "pasta"),
+    ("🍚", "rice"),
+    ("🍎", "apple"),
+    ("🍊", "orange"),
+    ("🐟", "salmon"),
+    ("🍷", "wine"),
+    ("💧", "water"),
+]
+
+
 with tab1:
     st.markdown("Search naturally — the engine combines keyword matching, semantic understanding, and AI reranking.")
 
+    if "current_query" not in st.session_state:
+        st.session_state["current_query"] = ""
+
+    st.caption("🔥 **Popular searches** — click any chip below to instantly search, or type your own below:")
+    n_cols = 6
+    for row_start in range(0, len(POPULAR_SEARCHES), n_cols):
+        cols = st.columns(n_cols)
+        for offset, col in enumerate(cols):
+            idx = row_start + offset
+            if idx >= len(POPULAR_SEARCHES):
+                break
+            emoji, term = POPULAR_SEARCHES[idx]
+            with col:
+                if st.button(f"{emoji} {term}", key=f"chip_{term}", use_container_width=True):
+                    st.session_state["current_query"] = term
+                    st.session_state["auto_search"] = True
+
     query = st.text_input(
         "What are you looking for? (type here, then click Search below)",
+        key="current_query",
         placeholder="e.g., low-sugar yogurt, organic almond milk, Korean BBQ ingredients",
     )
 
@@ -272,8 +318,9 @@ with tab1:
                     selected_attrs.append(attr_id)
 
     search_clicked = st.button("🔍 Search", type="primary", use_container_width=True, key="smart_search_btn")
+    auto_search = st.session_state.pop("auto_search", False)
 
-    if search_clicked:
+    if search_clicked or auto_search:
         if not query:
             st.warning("⚠️ Please type something in the search box first.")
         else:
