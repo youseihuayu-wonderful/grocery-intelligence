@@ -231,32 +231,69 @@ with tab0:
             render_product_card(p, rank=i, show_score=False)
 
 
-POPULAR_SEARCHES = [
-    ("🍌", "banana"),
-    ("🥛", "milk"),
-    ("🥚", "eggs"),
-    ("🍞", "bread"),
-    ("🍦", "yogurt"),
-    ("🍗", "chicken"),
-    ("🥑", "avocado"),
-    ("☕", "coffee"),
-    ("🧀", "cheese"),
-    ("🍫", "chocolate"),
-    ("🍅", "tomato"),
-    ("🥬", "lettuce"),
-    ("🥦", "broccoli"),
-    ("🧅", "onion"),
-    ("🥩", "beef"),
-    ("🍓", "strawberry"),
-    ("🥗", "salad"),
-    ("🍝", "pasta"),
-    ("🍚", "rice"),
-    ("🍎", "apple"),
-    ("🍊", "orange"),
-    ("🐟", "salmon"),
-    ("🍷", "wine"),
-    ("💧", "water"),
-]
+POPULAR_CATEGORIES = {
+    "🍎 Fruits": [
+        ("🍌", "banana"),
+        ("🍎", "apple"),
+        ("🍊", "orange"),
+        ("🍓", "strawberry"),
+        ("🥑", "avocado"),
+        ("🍇", "grapes"),
+        ("🍋", "lemon"),
+        ("🫐", "blueberry"),
+    ],
+    "🥬 Vegetables": [
+        ("🥬", "lettuce"),
+        ("🥦", "broccoli"),
+        ("🧅", "onion"),
+        ("🍅", "tomato"),
+        ("🥕", "carrot"),
+        ("🥔", "potato"),
+        ("🌿", "spinach"),
+        ("🍄", "mushroom"),
+    ],
+    "🥩 Meat & Seafood": [
+        ("🍗", "chicken"),
+        ("🥩", "beef"),
+        ("🐟", "salmon"),
+        ("🦐", "shrimp"),
+        ("🥓", "bacon"),
+        ("🦃", "turkey"),
+    ],
+    "🥛 Dairy & Eggs": [
+        ("🥛", "milk"),
+        ("🥚", "eggs"),
+        ("🧀", "cheese"),
+        ("🍦", "yogurt"),
+        ("🧈", "butter"),
+        ("🍨", "ice cream"),
+    ],
+    "🍞 Bread, Pasta & Grains": [
+        ("🍞", "bread"),
+        ("🍝", "pasta"),
+        ("🍚", "rice"),
+        ("🥣", "cereal"),
+        ("🥯", "bagel"),
+        ("🌽", "corn"),
+    ],
+    "🍷 Beverages & Alcohol": [
+        ("☕", "coffee"),
+        ("🍵", "tea"),
+        ("🍷", "wine"),
+        ("🍺", "beer"),
+        ("💧", "water"),
+        ("🧃", "juice"),
+        ("🥤", "soda"),
+    ],
+    "🍫 Snacks & Sweets": [
+        ("🍫", "chocolate"),
+        ("🍪", "cookies"),
+        ("🍟", "chips"),
+        ("🍿", "popcorn"),
+        ("🍬", "candy"),
+        ("🥨", "pretzel"),
+    ],
+}
 
 
 with tab1:
@@ -266,16 +303,13 @@ with tab1:
         st.session_state["current_query"] = ""
 
     st.caption("🔥 **Popular searches** — click any chip below to instantly search, or type your own below:")
-    n_cols = 6
-    for row_start in range(0, len(POPULAR_SEARCHES), n_cols):
+    n_cols = 8
+    for category_label, terms in POPULAR_CATEGORIES.items():
+        st.markdown(f"**{category_label}**")
         cols = st.columns(n_cols)
-        for offset, col in enumerate(cols):
-            idx = row_start + offset
-            if idx >= len(POPULAR_SEARCHES):
-                break
-            emoji, term = POPULAR_SEARCHES[idx]
-            with col:
-                if st.button(f"{emoji} {term}", key=f"chip_{term}", use_container_width=True):
+        for i, (emoji, term) in enumerate(terms):
+            with cols[i % n_cols]:
+                if st.button(f"{emoji} {term}", key=f"chip_{category_label}_{term}", use_container_width=True):
                     st.session_state["current_query"] = term
                     st.session_state["auto_search"] = True
 
