@@ -1,5 +1,13 @@
 """FastAPI application for Grocery Intelligence search and recommendation API."""
 
+# macOS libomp conflict workaround — sentence-transformers (PyTorch), faiss-cpu,
+# and xgboost each bundle their own libomp; loading all three in one process
+# can SIGABRT. These env vars must be set BEFORE numpy / torch / xgboost import.
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 
