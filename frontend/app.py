@@ -235,7 +235,7 @@ with tab1:
     st.markdown("Search naturally — the engine combines keyword matching, semantic understanding, and AI reranking.")
 
     query = st.text_input(
-        "What are you looking for?",
+        "What are you looking for? (type here, then click Search below)",
         placeholder="e.g., low-sugar yogurt, organic almond milk, Korean BBQ ingredients",
     )
 
@@ -258,12 +258,18 @@ with tab1:
     with col3:
         use_reranker = st.checkbox("AI Reranking (cross-encoder)", value=False)
 
-    selected_attrs = st.multiselect(
-        "Filter by attributes",
-        options=list(ATTRIBUTE_LABELS.keys()),
-        format_func=lambda a: ATTRIBUTE_LABELS.get(a, a),
-        help="Show only products matching ALL selected attributes",
-    )
+    with st.expander("🏷️ Filter by attributes (optional)", expanded=False):
+        st.caption(
+            "Tick boxes to narrow results to products matching ALL selected attributes. "
+            "These are dietary/nutritional tags, not product names — e.g. organic, gluten-free."
+        )
+        attr_cols = st.columns(3)
+        selected_attrs = []
+        for i, attr_id in enumerate(list(ATTRIBUTE_LABELS.keys())):
+            col = attr_cols[i % 3]
+            with col:
+                if st.checkbox(ATTRIBUTE_LABELS[attr_id], key=f"attr_{attr_id}"):
+                    selected_attrs.append(attr_id)
 
     search_clicked = st.button("🔍 Search", type="primary", use_container_width=True, key="smart_search_btn")
 
