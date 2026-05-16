@@ -265,29 +265,40 @@ with tab1:
         help="Show only products matching ALL selected attributes",
     )
 
-    if st.button("Search", type="primary", use_container_width=True) and query:
-        with st.spinner("Searching across 49,688 products..."):
-            try:
-                response = requests.post(
-                    f"{API_URL}/search",
-                    json={
-                        "query": query,
-                        "top_k": top_k,
-                        "use_reranker": use_reranker,
-                        "attributes": selected_attrs if selected_attrs else None,
-                        "user_id": ACTIVE_USER_ID,
-                    },
-                    timeout=30,
-                )
-                st.session_state["search_data"] = response.json()
-                st.session_state["search_input"] = query
-            except requests.ConnectionError:
-                st.error(
-                    "Cannot connect to API. "
-                    "Start the backend: `uvicorn src.api.main:app --reload`"
-                )
-            except requests.Timeout:
-                st.warning("Search timed out. Try a simpler query or disable reranking.")
+    search_clicked = st.button("🔍 Search", type="primary", use_container_width=True, key="smart_search_btn")
+
+    if search_clicked:
+        if not query:
+            st.warning("⚠️ Please type something in the search box first.")
+        else:
+            with st.spinner(f"Searching across 49,688 products for '{query}'..."):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/search",
+                        json={
+                            "query": query,
+                            "top_k": top_k,
+                            "use_reranker": use_reranker,
+                            "attributes": selected_attrs if selected_attrs else None,
+                            "user_id": ACTIVE_USER_ID,
+                        },
+                        timeout=30,
+                    )
+                    if response.status_code == 200:
+                        st.session_state["search_data"] = response.json()
+                        st.session_state["search_input"] = query
+                        st.success(f"✅ Got {st.session_state['search_data'].get('total_results', 0)} results — see below ↓")
+                    else:
+                        st.error(f"API returned {response.status_code}: {response.text[:200]}")
+                except requests.ConnectionError:
+                    st.error(
+                        "Cannot connect to API. "
+                        "Start the backend: `uvicorn src.api.main:app --reload`"
+                    )
+                except requests.Timeout:
+                    st.warning("Search timed out. Try a simpler query or disable reranking.")
+                except Exception as exc:
+                    st.error(f"Unexpected error: {exc}")
 
     data = st.session_state.get("search_data")
     last_query = st.session_state.get("search_input", "")
@@ -300,7 +311,7 @@ with tab1:
             )
 
         results = data.get("results", [])
-        st.subheader(f"Results for \"{corrected or last_query}\" ({data.get('total_results', 0)} found)")
+        st.subheader(f"📦 Results for \"{corrected or last_query}\" ({data.get('total_results', 0)} found)")
 
         if not results:
             st.warning("No products matched. Try a broader query or clear filters.")
