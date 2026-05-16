@@ -279,20 +279,8 @@ with tab1:
                     },
                     timeout=30,
                 )
-                data = response.json()
-
-                corrected = data.get("corrected_query")
-                if corrected and corrected != query:
-                    st.info(
-                        f"🔤 Searching for **{corrected}** instead of \"{query}\" "
-                        "(auto-corrected)."
-                    )
-
-                st.subheader(f"Results for \"{corrected or query}\" ({data.get('total_results', 0)} found)")
-
-                for i, product in enumerate(data.get("results", []), 1):
-                    render_product_card(product, rank=i)
-
+                st.session_state["search_data"] = response.json()
+                st.session_state["search_input"] = query
             except requests.ConnectionError:
                 st.error(
                     "Cannot connect to API. "
@@ -300,6 +288,24 @@ with tab1:
                 )
             except requests.Timeout:
                 st.warning("Search timed out. Try a simpler query or disable reranking.")
+
+    data = st.session_state.get("search_data")
+    last_query = st.session_state.get("search_input", "")
+    if data:
+        corrected = data.get("corrected_query")
+        if corrected and corrected != last_query:
+            st.info(
+                f"🔤 Searching for **{corrected}** instead of \"{last_query}\" "
+                "(auto-corrected)."
+            )
+
+        results = data.get("results", [])
+        st.subheader(f"Results for \"{corrected or last_query}\" ({data.get('total_results', 0)} found)")
+
+        if not results:
+            st.warning("No products matched. Try a broader query or clear filters.")
+        for i, product in enumerate(results, 1):
+            render_product_card(product, rank=i)
 
 with tab2:
     st.markdown("Find alternatives when a product is out of stock — search by name to find your product.")
