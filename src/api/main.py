@@ -280,6 +280,25 @@ async def search_products(request: SearchRequest):
             corrected_query = candidate
             effective_query = candidate
 
+    from src.search.category_browse import is_category_query, browse_category
+    catalog_df = _state.get("catalog")
+    if catalog_df is not None and is_category_query(effective_query):
+        browse_rows = browse_category(catalog_df, effective_query, top_k=request.top_k)
+        cleaned = [_clean_product(r) for r in browse_rows]
+        if request.attributes:
+            required = set(request.attributes)
+            cleaned = [
+                r for r in cleaned
+                if r.get("attributes") and required.issubset(set(r["attributes"]))
+            ]
+        cleaned = cleaned[: request.top_k]
+        return SearchResponse(
+            query=request.query,
+            results=[ProductResult(**r) for r in cleaned],
+            total_results=len(cleaned),
+            corrected_query=corrected_query,
+        )
+
     fetch_k = max(request.top_k * 5, 50)
 
     results = engine.search(

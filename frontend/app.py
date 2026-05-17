@@ -297,15 +297,38 @@ POPULAR_CATEGORIES = {
 
 
 with tab1:
-    st.markdown("Search naturally — the engine combines keyword matching, semantic understanding, and AI reranking.")
+    st.markdown(
+        "Search naturally — the engine combines keyword matching, semantic understanding, and AI reranking. "
+        "Type a specific product (e.g. `banana`, `oat milk`, `gluten-free bread`) "
+        "or a whole category (e.g. `fruit`, `vegetable`, `meat`, `drinks`, `dessert`) to browse."
+    )
 
     if "current_query" not in st.session_state:
         st.session_state["current_query"] = ""
 
-    st.caption("🔥 **Popular searches** — click a category to expand, then click any product to search instantly:")
+    st.caption("🔥 **Popular searches** — click a category to expand, then click any product to search instantly. Or click \"Browse all\" to see all items in that category:")
+    CATEGORY_BROWSE_QUERIES = {
+        "🍎 Fruits": "fruit",
+        "🥬 Vegetables": "vegetable",
+        "🥩 Meat & Seafood": "meat",
+        "🥛 Dairy & Eggs": "dairy",
+        "🍞 Bread, Pasta & Grains": "bakery",
+        "🍷 Beverages & Alcohol": "drinks",
+        "🍫 Snacks & Sweets": "snacks",
+    }
+
     n_cols = 6
     for category_label, terms in POPULAR_CATEGORIES.items():
         with st.expander(category_label, expanded=False):
+            browse_query = CATEGORY_BROWSE_QUERIES.get(category_label)
+            if browse_query and st.button(
+                f"📂 Browse all {category_label.split(' ', 1)[1]} (diverse mix)",
+                key=f"browse_{category_label}",
+                use_container_width=True,
+            ):
+                st.session_state["current_query"] = browse_query
+                st.session_state["auto_search"] = True
+
             cols = st.columns(n_cols)
             for i, (emoji, term) in enumerate(terms):
                 with cols[i % n_cols]:
