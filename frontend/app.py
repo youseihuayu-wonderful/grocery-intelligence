@@ -43,8 +43,8 @@ ACTIVE_USER_ID = _user_options[_selected_label]
 if ACTIVE_USER_ID is not None:
     st.caption(f"✨ Personalization active for User {ACTIVE_USER_ID}")
 
-tab0, tab1, tab2, tab3 = st.tabs(
-    ["🏠 Home", "🔍 Smart Search", "🔄 Substitute Finder", "🤖 Shopping Assistant"]
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["🏠 Home", "🔍 Smart Search", "🛒 Cart", "📦 Your Orders", "🔄 Substitute Finder", "🤖 Shopping Assistant"]
 )
 
 
@@ -163,6 +163,26 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
         reasons = product.get("substitution_reasons", [])
         if reasons:
             st.success(" · ".join(f"✓ {r}" for r in reasons))
+
+        # Cart / Wishlist actions (only shown when signed in)
+        pid = product.get("product_id")
+        if pid is not None and ACTIVE_USER_ID is not None:
+            action_cols = st.columns([1, 1, 3])
+            with action_cols[0]:
+                if st.button("🛒 Add", key=f"add_cart_{pid}_{rank}"):
+                    requests.post(
+                        f"{API_URL}/cart/add",
+                        json={"user_id": ACTIVE_USER_ID, "product_id": pid, "qty": 1},
+                        timeout=5,
+                    )
+                    st.toast(f"Added '{name}' to cart") if hasattr(st, "toast") else None
+            with action_cols[1]:
+                if st.button("❤️ Save", key=f"save_wl_{pid}_{rank}"):
+                    requests.post(
+                        f"{API_URL}/wishlist/add",
+                        json={"user_id": ACTIVE_USER_ID, "product_id": pid},
+                        timeout=5,
+                    )
 
 
 with tab0:
@@ -429,6 +449,119 @@ with tab1:
             render_product_card(product, rank=i)
 
 with tab2:
+    st.markdown("Your shopping cart and saved-for-later list.")
+    if ACTIVE_USER_ID is None:
+        st.info("💡 Sign in as a demo user above to use the cart.")
+    else:
+        try:
+            cart_response = requests.get(f"{API_URL}/cart/{ACTIVE_USER_ID}", timeout=5)
+            cart_data = cart_response.json() if cart_response.status_code == 200 else {"items": []}
+        except requests.RequestException:
+            cart_data = {"items": []}
+
+        items = cart_data.get("items", [])
+        total = cart_data.get("total_items", 0)
+        st.subheader(f"🛒 Cart ({total} items)")
+        if not items:
+            st.info("Your cart is empty. Add items from Smart Search results.")
+        else:
+            for item in items:
+                with st.container(border=True):
+                    cols = st.columns([0.7, 4, 2, 1])
+                    with cols[0]:
+                        st.markdown(
+                            f"<div style='font-size:36px; text-align:center'>{item.get('emoji', '📦')}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with cols[1]:
+                        st.markdown(f"**{item['product_name']}**")
+                        st.caption(f"{item.get('category', '')} · {item.get('department', '')}")
+                    with cols[2]:
+                        st.markdown(f"Qty: **{item['qty']}**")
+                    with cols[3]:
+                        if st.button("Remove", key=f"cart_rm_{item['product_id']}"):
+                            requests.post(
+                                f"{API_URL}/cart/remove",
+                                json={"user_id": ACTIVE_USER_ID, "product_id": item["product_id"]},
+                                timeout=5,
+                            )
+                            st.experimental_rerun()
+            if st.button("🗑️ Clear cart", type="secondary"):
+                requests.post(f"{API_URL}/cart/clear/{ACTIVE_USER_ID}", timeout=5)
+                st.experimental_rerun()
+            st.success(f"✅ Ready to checkout — {total} items selected (demo only, no payment)")
+
+        st.markdown("---")
+        st.subheader("❤️ Wishlist")
+        try:
+            wl_response = requests.get(f"{API_URL}/wishlist/{ACTIVE_USER_ID}", timeout=5)
+            wl_items = wl_response.json().get("items", []) if wl_response.status_code == 200 else []
+        except requests.RequestException:
+            wl_items = []
+        if not wl_items:
+            st.caption("Nothing saved for later yet.")
+        else:
+            for it in wl_items:
+                render_product_card(it, show_score=False)
+
+
+with tab3:
+    st.markdown("Your prior orders + one-click reorder using real Instacart history.")
+    if ACTIVE_USER_ID is None:
+        st.info("💡 Sign in as a demo user above to see your order history.")
+    else:
+        st.subheader("⭐ Buy It Again")
+        st.caption("Your most-frequently-purchased items")
+        try:
+            ba_response = requests.get(
+                f"{API_URL}/orders/buy-again/{ACTIVE_USER_ID}", params={"top_k": 6}, timeout=10,
+            )
+            buy_again_items = ba_response.json().get("products", []) if ba_response.status_code == 200 else []
+        except requests.RequestException:
+            buy_again_items = []
+        if not buy_again_items:
+            st.caption("No prior order history found for this user (history loaded only for the top 10K most active users — try a heavy buyer like User 206105).")
+        else:
+            for p in buy_again_items:
+                render_product_card(p, show_score=False)
+
+        st.markdown("---")
+        st.subheader("📦 Recent Orders")
+        try:
+            orders_response = requests.get(
+                f"{API_URL}/orders/{ACTIVE_USER_ID}", params={"limit": 5}, timeout=10,
+            )
+            orders_data = orders_response.json() if orders_response.status_code == 200 else {"orders": []}
+        except requests.RequestException:
+            orders_data = {"orders": []}
+        recent_orders = orders_data.get("orders", [])
+        if not recent_orders:
+            st.caption("No orders found.")
+        else:
+            for o in recent_orders[:5]:
+                with st.expander(f"Order #{o['order_number']} — {o['n_items']} items"):
+                    st.caption(
+                        f"Day-of-week: {o['order_dow']} · Hour: {o['order_hour_of_day']}:00 · "
+                        f"Days since prior: {o.get('days_since_prior_order') or 'N/A'}"
+                    )
+                    if st.button(f"🔁 Reorder all {o['n_items']} items", key=f"reorder_{o['order_id']}"):
+                        for entry in o["items"]:
+                            try:
+                                requests.post(
+                                    f"{API_URL}/cart/add",
+                                    json={
+                                        "user_id": ACTIVE_USER_ID,
+                                        "product_id": entry["product_id"],
+                                        "qty": 1,
+                                    },
+                                    timeout=5,
+                                )
+                            except requests.RequestException:
+                                pass
+                        st.success(f"Added {o['n_items']} items to your cart. Switch to 🛒 Cart tab to view.")
+
+
+with tab4:
     st.markdown("Find alternatives when a product is out of stock — search by name to find your product.")
 
     product_query = st.text_input(
@@ -534,7 +667,7 @@ with tab2:
     elif product_query:
         st.info("No products found. Try a different search term.")
 
-with tab3:
+with tab5:
     st.markdown(
         "Ask shopping questions in natural language — answers are grounded in the product catalog "
         "using retrieval-augmented generation (RAG)."

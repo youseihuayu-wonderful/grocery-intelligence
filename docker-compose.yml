@@ -1,23 +1,61 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
     ports:
       - "8000:8000"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - ./data:/app/data:ro
+      - ./models:/app/models:ro
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
+      interval: 10s
       timeout: 10s
-      retries: 3
+      retries: 5
+    restart: unless-stopped
 
-  frontend:
-    build: .
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    platform: linux/amd64
     ports:
       - "8501:8501"
     environment:
       - API_URL=http://api:8000
-    command: streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0
     depends_on:
       api:
         condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - api
+    restart: unless-stopped

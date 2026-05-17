@@ -226,6 +226,46 @@ async def lifespan(app: FastAPI):
     else:
         _state["ltr_behavioral"] = None
 
+    from src.shopping.cart import CartStore
+    _state["cart"] = CartStore()
+    logger.info("Cart/wishlist store ready")
+
+    orders_csv = DATA_DIR / "raw" / "instacart" / "orders.csv"
+    order_products_csv = DATA_DIR / "raw" / "instacart" / "order_products__prior.csv"
+    if orders_csv.exists() and order_products_csv.exists():
+        from src.shopping.orders import OrderHistoryStore
+        logger.info("Loading order history (user_cap=10000)...")
+        try:
+            _state["order_history"] = OrderHistoryStore(
+                orders_csv, order_products_csv, user_cap=10_000
+            )
+            logger.info("Order history loaded")
+        except Exception as e:
+            logger.warning(f"Order history load failed: {e}")
+            _state["order_history"] = None
+    else:
+        logger.info("Instacart CSVs not found — order history unavailable")
+        _state["order_history"] = None
+
+    coview_path = DATA_DIR / "processed" / "coview_model.parquet"
+    if coview_path.exists():
+        from src.recommend.coview import CustomersAlsoViewed
+        try:
+            _state["coview"] = CustomersAlsoViewed.load(coview_path)
+            logger.info(f"Coview model loaded ({len(_state['coview'].related_map)} products)")
+        except Exception as e:
+            logger.warning(f"Coview load failed: {e}")
+            _state["coview"] = None
+    else:
+        _state["coview"] = None
+
+    from src.infra.cache import CacheClient
+    _state["cache"] = CacheClient()
+    if _state["cache"].is_available():
+        logger.info("Redis cache connected")
+    else:
+        logger.info("Redis not reachable — running without cache layer")
+
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
     yield
@@ -245,6 +285,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from src.infra.metrics import install_metrics
+install_metrics(app)
 
 
 @app.get("/health")
@@ -669,6 +712,153 @@ async def log_event(request: EventRequest):
         return {"event_id": event_id, "status": "logged"}
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+class CartItemRequest(BaseModel):
+    user_id: int
+    product_id: int
+    qty: int = 1
+
+
+@app.post("/cart/add")
+async def cart_add(req: CartItemRequest):
+    """Add an item to the user's cart (increments qty if already present)."""
+    _state["cart"].add_to_cart(req.user_id, req.product_id, req.qty)
+    return {"status": "added", "cart_count": _state["cart"].cart_count(req.user_id)}
+
+
+@app.post("/cart/update")
+async def cart_update(req: CartItemRequest):
+    """Set the qty for an item (removes when qty<=0)."""
+    _state["cart"].update_cart_qty(req.user_id, req.product_id, req.qty)
+    return {"status": "ok", "cart_count": _state["cart"].cart_count(req.user_id)}
+
+
+@app.post("/cart/remove")
+async def cart_remove(req: CartItemRequest):
+    _state["cart"].remove_from_cart(req.user_id, req.product_id)
+    return {"status": "removed"}
+
+
+@app.get("/cart/{user_id}")
+async def cart_get(user_id: int):
+    """Return the user's full cart with product details merged from catalog."""
+    catalog = _state.get("catalog")
+    cart_rows = _state["cart"].get_cart(user_id)
+    if not cart_rows or catalog is None:
+        return {"items": [], "total_items": 0}
+    pids = [r["product_id"] for r in cart_rows]
+    products = catalog[catalog["product_id"].isin(pids)].set_index("product_id")
+    items = []
+    for row in cart_rows:
+        if row["product_id"] in products.index:
+            p = _clean_product(products.loc[row["product_id"]].to_dict())
+            p["qty"] = row["qty"]
+            items.append(p)
+    return {"items": items, "total_items": sum(r["qty"] for r in cart_rows)}
+
+
+@app.post("/cart/clear/{user_id}")
+async def cart_clear(user_id: int):
+    _state["cart"].clear_cart(user_id)
+    return {"status": "cleared"}
+
+
+class WishlistRequest(BaseModel):
+    user_id: int
+    product_id: int
+
+
+@app.post("/wishlist/add")
+async def wishlist_add(req: WishlistRequest):
+    _state["cart"].add_to_wishlist(req.user_id, req.product_id)
+    return {"status": "added"}
+
+
+@app.post("/wishlist/remove")
+async def wishlist_remove(req: WishlistRequest):
+    _state["cart"].remove_from_wishlist(req.user_id, req.product_id)
+    return {"status": "removed"}
+
+
+@app.get("/wishlist/{user_id}")
+async def wishlist_get(user_id: int):
+    catalog = _state.get("catalog")
+    rows = _state["cart"].get_wishlist(user_id)
+    if not rows or catalog is None:
+        return {"items": []}
+    pids = [r["product_id"] for r in rows]
+    products = catalog[catalog["product_id"].isin(pids)]
+    items = [_clean_product(r) for _, r in products.iterrows()]
+    return {"items": items}
+
+
+@app.get("/orders/{user_id}")
+async def orders_for_user(user_id: int, limit: int = Query(default=10, le=50)):
+    """Return the user's prior orders, newest first."""
+    store = _state.get("order_history")
+    if store is None:
+        raise HTTPException(503, "Order history not loaded")
+    orders = store.get_user_orders(user_id)[:limit]
+    return {"user_id": user_id, "order_count": len(orders), "orders": orders}
+
+
+@app.get("/orders/buy-again/{user_id}")
+async def buy_again(user_id: int, top_k: int = Query(default=10, le=30)):
+    """Return user's most-frequently-purchased products with full product info."""
+    store = _state.get("order_history")
+    catalog = _state.get("catalog")
+    if store is None:
+        raise HTTPException(503, "Order history not loaded")
+    pids = store.buy_again_top(user_id, top_k=top_k)
+    if not pids:
+        return {"user_id": user_id, "products": []}
+    df = catalog[catalog["product_id"].isin(pids)].set_index("product_id")
+    products = []
+    for pid in pids:
+        if pid in df.index:
+            products.append(_clean_product(df.loc[pid].to_dict()))
+    return {"user_id": user_id, "products": products}
+
+
+@app.get("/coview/{product_id}")
+async def coview_for_product(product_id: int, top_k: int = 10):
+    """Customers also viewed — user-level item co-occurrence."""
+    coview = _state.get("coview")
+    catalog = _state.get("catalog")
+    if coview is None:
+        raise HTTPException(503, "Coview model not loaded. Run scripts/build_coview.py")
+    related = coview.get_related(product_id, top_k=top_k)
+    if not related:
+        return {"product_id": product_id, "related": []}
+    related_ids = [pid for pid, _ in related]
+    scores = {pid: s for pid, s in related}
+    rows = []
+    df = catalog[catalog["product_id"].isin(related_ids)]
+    for _, row in df.iterrows():
+        d = _clean_product(row.to_dict())
+        d["similarity_score"] = scores.get(d["product_id"])
+        rows.append(d)
+    rows.sort(key=lambda r: r.get("similarity_score") or 0, reverse=True)
+    return {"product_id": product_id, "related": rows}
+
+
+@app.get("/compare")
+async def compare_endpoint(ids: str):
+    """Side-by-side product comparison. ids is comma-separated product_ids."""
+    catalog = _state.get("catalog")
+    try:
+        product_ids = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "ids must be a comma-separated list of integers")
+    if len(product_ids) < 2 or len(product_ids) > 6:
+        raise HTTPException(400, "compare requires 2-6 product ids")
+    from src.recommend.compare import compare_products
+    try:
+        result = compare_products(catalog, product_ids)
+    except Exception as e:
+        raise HTTPException(400, str(e))
+    return result
 
 
 @app.get("/related/{product_id}")
