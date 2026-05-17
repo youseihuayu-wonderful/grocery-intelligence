@@ -302,16 +302,16 @@ with tab1:
     if "current_query" not in st.session_state:
         st.session_state["current_query"] = ""
 
-    st.caption("🔥 **Popular searches** — click any chip below to instantly search, or type your own below:")
-    n_cols = 8
+    st.caption("🔥 **Popular searches** — click a category to expand, then click any product to search instantly:")
+    n_cols = 6
     for category_label, terms in POPULAR_CATEGORIES.items():
-        st.markdown(f"**{category_label}**")
-        cols = st.columns(n_cols)
-        for i, (emoji, term) in enumerate(terms):
-            with cols[i % n_cols]:
-                if st.button(f"{emoji} {term}", key=f"chip_{category_label}_{term}", use_container_width=True):
-                    st.session_state["current_query"] = term
-                    st.session_state["auto_search"] = True
+        with st.expander(category_label, expanded=False):
+            cols = st.columns(n_cols)
+            for i, (emoji, term) in enumerate(terms):
+                with cols[i % n_cols]:
+                    if st.button(f"{emoji} {term}", key=f"chip_{category_label}_{term}", use_container_width=True):
+                        st.session_state["current_query"] = term
+                        st.session_state["auto_search"] = True
 
     query = st.text_input(
         "What are you looking for? (type here, then click Search below)",
