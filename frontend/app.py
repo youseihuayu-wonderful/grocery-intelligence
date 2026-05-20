@@ -142,9 +142,11 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
                 st.caption(f"Nutri-Score: {grade_colors.get(grade, '⚪')} {grade.upper()}")
 
         with cols[3]:
+            price = product.get("price")
+            if price is not None:
+                st.markdown(f"### ${price:,.2f}")
             if popularity:
-                st.markdown(f"**📊 {popularity:,}**")
-                st.caption("orders")
+                st.caption(f"📊 {popularity:,} orders")
             personalization = product.get("personalization_score")
             if personalization and personalization > 0.2:
                 st.caption(f"🎯 Match: {int(personalization * 100)}%")
@@ -467,7 +469,7 @@ with tab2:
         else:
             for item in items:
                 with st.container(border=True):
-                    cols = st.columns([0.7, 4, 2, 1])
+                    cols = st.columns([0.7, 4, 1.5, 1.5, 1])
                     with cols[0]:
                         st.markdown(
                             f"<div style='font-size:36px; text-align:center'>{item.get('emoji', '📦')}</div>",
@@ -477,8 +479,16 @@ with tab2:
                         st.markdown(f"**{item['product_name']}**")
                         st.caption(f"{item.get('category', '')} · {item.get('department', '')}")
                     with cols[2]:
-                        st.markdown(f"Qty: **{item['qty']}**")
+                        unit_price = item.get("price")
+                        if unit_price is not None:
+                            line_total = unit_price * item["qty"]
+                            st.markdown(f"**${line_total:,.2f}**")
+                            st.caption(f"${unit_price:,.2f} × {item['qty']}")
+                        else:
+                            st.markdown(f"Qty: **{item['qty']}**")
                     with cols[3]:
+                        st.markdown(f"Qty: **{item['qty']}**")
+                    with cols[4]:
                         if st.button("Remove", key=f"cart_rm_{item['product_id']}"):
                             requests.post(
                                 f"{API_URL}/cart/remove",
@@ -486,10 +496,53 @@ with tab2:
                                 timeout=5,
                             )
                             st.experimental_rerun()
-            if st.button("🗑️ Clear cart", type="secondary"):
-                requests.post(f"{API_URL}/cart/clear/{ACTIVE_USER_ID}", timeout=5)
-                st.experimental_rerun()
-            st.success(f"✅ Ready to checkout — {total} items selected (demo only, no payment)")
+
+            # Pricing summary + promotions
+            try:
+                pricing_response = requests.get(
+                    f"{API_URL}/cart/{ACTIVE_USER_ID}/pricing", timeout=5,
+                )
+                pricing = pricing_response.json() if pricing_response.status_code == 200 else {}
+            except requests.RequestException:
+                pricing = {}
+
+            if pricing:
+                st.markdown("---")
+                subtotal = pricing.get("subtotal", 0)
+                total_discount = pricing.get("total_discount", 0)
+                final_total = pricing.get("total", 0)
+
+                # Applied promotions
+                applied = pricing.get("promotions_applied", [])
+                if applied:
+                    st.subheader("🎉 Promotions Applied")
+                    for p in applied:
+                        st.success(f"✅ **{p['title']}** — {p['description']} (Save ${p['discount_amount']:.2f})")
+
+                # Incentive promotions (progress bars)
+                available = pricing.get("promotions_available", [])
+                if available:
+                    st.subheader("💡 Unlock More Savings")
+                    for p in available[:3]:
+                        progress = p.get("progress", 0)
+                        st.markdown(f"**{p['title']}** — {p['description']}")
+                        st.progress(min(progress, 1.0))
+
+                st.markdown("---")
+                bottom_cols = st.columns(3)
+                bottom_cols[0].metric("Subtotal", f"${subtotal:,.2f}")
+                bottom_cols[1].metric("Discount", f"-${total_discount:,.2f}")
+                bottom_cols[2].metric("**Total**", f"${final_total:,.2f}")
+
+            cart_button_cols = st.columns([2, 1])
+            with cart_button_cols[0]:
+                if st.button("💳 Checkout (demo)", type="primary", use_container_width=True):
+                    st.balloons()
+                    st.success(f"✅ Order placed! {total} items, total ${pricing.get('total', 0):,.2f} (demo only, no payment processed).")
+            with cart_button_cols[1]:
+                if st.button("🗑️ Clear cart", use_container_width=True):
+                    requests.post(f"{API_URL}/cart/clear/{ACTIVE_USER_ID}", timeout=5)
+                    st.experimental_rerun()
 
         st.markdown("---")
         st.subheader("❤️ Wishlist")
@@ -668,60 +721,229 @@ with tab4:
         st.info("No products found. Try a different search term.")
 
 with tab5:
-    st.markdown(
-        "Ask shopping questions in natural language — answers are grounded in the product catalog "
-        "using retrieval-augmented generation (RAG)."
+    assistant_mode = st.radio(
+        "Mode",
+        ["💬 Q&A", "🍳 Recipe → Cart", "🎯 Goal-based Shopping"],
+        horizontal=True,
+        key="assistant_mode",
     )
 
-    question = st.text_area(
-        "Your question",
-        placeholder="e.g., What can I use instead of heavy cream?",
-        key="qa_question",
-    )
+    if assistant_mode == "🍳 Recipe → Cart":
+        st.markdown(
+            "Type a recipe or dish name — the AI extracts ingredients, matches them to real products, "
+            "and lets you add the whole shopping list to your cart with one click."
+        )
+        recipe = st.text_input(
+            "Recipe / dish",
+            placeholder="e.g., Korean beef bowls · vegetarian pad thai · chocolate chip cookies",
+            key="recipe_query",
+        )
+        if st.button("🧑‍🍳 Generate shopping list", type="primary", use_container_width=True) and recipe:
+            with st.spinner("Asking the AI to decompose the recipe..."):
+                try:
+                    r = requests.post(
+                        f"{API_URL}/agent/recipe-to-cart",
+                        json={"recipe": recipe, "user_id": ACTIVE_USER_ID},
+                        timeout=60,
+                    )
+                    if r.status_code == 200:
+                        st.session_state["recipe_plan"] = r.json()
+                    else:
+                        st.error(f"Error: {r.text[:200]}")
+                except requests.RequestException as exc:
+                    st.error(f"Request failed: {exc}")
+                except requests.Timeout:
+                    st.warning("Timed out. Try a simpler recipe.")
 
-    qa_top_k = st.slider("Products to ground the answer", 3, 10, 5, key="qa_top_k")
+        plan = st.session_state.get("recipe_plan")
+        if plan:
+            st.success(f"📋 {plan.get('summary', '')}")
+            matches = plan.get("matches", [])
+            st.subheader(f"🛒 Shopping list ({len(matches)} items)")
+            for m in matches:
+                product = m.get("product")
+                with st.container(border=True):
+                    cols = st.columns([0.7, 4, 1.5, 1.5])
+                    with cols[0]:
+                        emoji = product.get("emoji", "📦") if product else "❓"
+                        st.markdown(
+                            f"<div style='font-size:36px; text-align:center'>{emoji}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with cols[1]:
+                        st.markdown(f"**{m['requested_name']}**")
+                        if m.get("quantity"):
+                            st.caption(f"Needed: {m['quantity']}")
+                        if product:
+                            st.caption(f"Matched: {product['product_name']}")
+                    with cols[2]:
+                        if product and product.get("price"):
+                            st.markdown(f"**${product['price']:.2f}**")
+                    with cols[3]:
+                        if product and ACTIVE_USER_ID and st.button(
+                            "🛒 Add", key=f"recipe_add_{product['product_id']}"
+                        ):
+                            requests.post(
+                                f"{API_URL}/cart/add",
+                                json={"user_id": ACTIVE_USER_ID, "product_id": product["product_id"], "qty": 1},
+                                timeout=5,
+                            )
 
-    if st.button("Ask", type="primary", use_container_width=True, key="qa_ask") and question:
-        with st.spinner("Thinking..."):
-            try:
-                response = requests.post(
-                    f"{API_URL}/qa",
-                    json={"question": question, "top_k": qa_top_k},
-                    timeout=60,
-                )
+            if ACTIVE_USER_ID and st.button(
+                "🛒 Add ALL to cart", type="primary", use_container_width=True
+            ):
+                added = 0
+                for m in matches:
+                    if m.get("product"):
+                        try:
+                            requests.post(
+                                f"{API_URL}/cart/add",
+                                json={
+                                    "user_id": ACTIVE_USER_ID,
+                                    "product_id": m["product"]["product_id"],
+                                    "qty": 1,
+                                },
+                                timeout=5,
+                            )
+                            added += 1
+                        except requests.RequestException:
+                            pass
+                st.success(f"✅ Added {added} items to your cart. Switch to 🛒 Cart tab to view.")
+            elif not ACTIVE_USER_ID:
+                st.info("💡 Sign in as a demo user above to add items to your cart.")
 
-                if response.status_code == 200:
-                    data = response.json()
+    elif assistant_mode == "🎯 Goal-based Shopping":
+        st.markdown(
+            "Tell the AI your shopping goal in plain language — it interprets and returns a structured plan."
+        )
+        goal = st.text_input(
+            "Your goal",
+            placeholder="e.g., Healthy lunches for the work week under $50 · Snacks for kids party",
+            key="goal_query",
+        )
+        if st.button("🎯 Plan", type="primary", use_container_width=True, key="goal_plan") and goal:
+            with st.spinner("Planning..."):
+                try:
+                    r = requests.post(
+                        f"{API_URL}/agent/plan-shopping",
+                        json={"goal": goal, "user_id": ACTIVE_USER_ID, "max_products": 20},
+                        timeout=60,
+                    )
+                    if r.status_code == 200:
+                        st.session_state["goal_plan"] = r.json()
+                    else:
+                        st.error(f"Error: {r.text[:200]}")
+                except requests.RequestException as exc:
+                    st.error(str(exc))
 
-                    st.info(data.get("answer", ""))
+        gplan = st.session_state.get("goal_plan")
+        if gplan:
+            st.info(f"💡 {gplan.get('interpretation', '')}")
+            if gplan.get("notes"):
+                st.caption(gplan["notes"])
+            for cat in gplan.get("categories", []):
+                st.subheader(f"📦 {cat['category']}")
+                for item in cat.get("items", []):
+                    if item.get("product"):
+                        render_product_card(item["product"], show_score=False)
 
-                    model_name = data.get("model", "")
-                    if model_name:
-                        st.caption(f"Powered by {model_name}")
+    else:  # 💬 Q&A mode
+        st.markdown(
+            "Ask shopping questions in natural language — answers are grounded in the product catalog "
+            "using retrieval-augmented generation (RAG)."
+        )
 
-                    referenced = data.get("referenced_products", [])
-                    if referenced:
-                        st.subheader("Referenced Products")
-                        for i, product in enumerate(referenced, 1):
-                            render_product_card(product, rank=i, show_score=False)
-                else:
-                    try:
-                        err = response.json()
-                        message = err.get("detail") or err.get("message") or response.text
-                    except Exception:
-                        message = response.text
-                    st.error(f"Error from server: {message}")
+        question = st.text_area(
+            "Your question",
+            placeholder="e.g., What can I use instead of heavy cream?",
+            key="qa_question",
+        )
 
-            except requests.ConnectionError:
-                st.error(
-                    "Cannot connect to API. "
-                    "Start the backend: `uvicorn src.api.main:app --reload`"
-                )
-            except requests.Timeout:
-                st.warning("Request timed out. Try a simpler question.")
+        qa_top_k = st.slider("Products to ground the answer", 3, 10, 5, key="qa_top_k")
+
+        if st.button("Ask", type="primary", use_container_width=True, key="qa_ask") and question:
+            with st.spinner("Thinking..."):
+                try:
+                    response = requests.post(
+                        f"{API_URL}/qa",
+                        json={"question": question, "top_k": qa_top_k},
+                        timeout=60,
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+
+                        st.info(data.get("answer", ""))
+
+                        model_name = data.get("model", "")
+                        if model_name:
+                            st.caption(f"Powered by {model_name}")
+
+                        referenced = data.get("referenced_products", [])
+                        if referenced:
+                            st.subheader("Referenced Products")
+                            for i, product in enumerate(referenced, 1):
+                                render_product_card(product, rank=i, show_score=False)
+                    else:
+                        try:
+                            err = response.json()
+                            message = err.get("detail") or err.get("message") or response.text
+                        except Exception:
+                            message = response.text
+                        st.error(f"Error from server: {message}")
+
+                except requests.ConnectionError:
+                    st.error(
+                        "Cannot connect to API. "
+                        "Start the backend: `uvicorn src.api.main:app --reload`"
+                    )
+                except requests.Timeout:
+                    st.warning("Request timed out. Try a simpler question.")
 
 # Sidebar with project info
 with st.sidebar:
+    st.markdown("### 🍃 Dietary Preferences")
+    if ACTIVE_USER_ID is None:
+        st.caption("Sign in to set persistent preferences")
+    else:
+        try:
+            prefs_resp = requests.get(f"{API_URL}/preferences/{ACTIVE_USER_ID}", timeout=2)
+            saved_prefs = prefs_resp.json() if prefs_resp.status_code == 200 else {}
+        except requests.RequestException:
+            saved_prefs = {}
+
+        DIETARY_OPTIONS = [
+            ("organic", "🌿 Organic"),
+            ("gluten-free", "🌾 Gluten-Free"),
+            ("vegan", "🌱 Vegan"),
+            ("vegetarian", "🥬 Vegetarian"),
+            ("dairy-free", "🥛 Dairy-Free"),
+            ("low-sugar", "🍯 Low Sugar"),
+            ("high-protein", "💪 High Protein"),
+            ("low-fat", "🥦 Low Fat"),
+            ("keto-friendly", "🥑 Keto"),
+            ("nut-free", "🥜 Nut-Free"),
+        ]
+        current = set(saved_prefs.get("dietary_attributes", []))
+        st.caption("Select dietary requirements to auto-filter your searches.")
+        selected = []
+        for attr_id, label in DIETARY_OPTIONS:
+            if st.checkbox(label, value=(attr_id in current), key=f"pref_{attr_id}"):
+                selected.append(attr_id)
+        if selected != list(current):
+            if st.button("💾 Save preferences"):
+                requests.post(
+                    f"{API_URL}/preferences",
+                    json={
+                        "user_id": ACTIVE_USER_ID,
+                        "dietary_attributes": selected,
+                        "excluded_attributes": [],
+                    },
+                    timeout=5,
+                )
+                st.success("Saved!")
+
+    st.markdown("---")
     st.markdown("### 🧪 A/B Experiments")
     try:
         exp_response = requests.get(
