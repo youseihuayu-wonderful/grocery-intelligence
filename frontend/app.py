@@ -43,8 +43,9 @@ ACTIVE_USER_ID = _user_options[_selected_label]
 if ACTIVE_USER_ID is not None:
     st.caption(f"✨ Personalization active for User {ACTIVE_USER_ID}")
 
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["🏠 Home", "🔍 Smart Search", "🛒 Cart", "📦 Your Orders", "🔄 Substitute Finder", "🤖 Shopping Assistant"]
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+    ["🏠 Home", "🔍 Smart Search", "🛒 Cart", "📦 Your Orders",
+     "🔁 Subscribe & Save", "🔄 Substitute Finder", "🤖 Shopping Assistant", "📊 Analytics"]
 )
 
 
@@ -669,6 +670,105 @@ with tab3:
 
 
 with tab4:
+    st.markdown("Subscribe to products you reorder regularly — auto-fills your cart on a schedule.")
+    if ACTIVE_USER_ID is None:
+        st.info("💡 Sign in as a demo user above to manage subscriptions.")
+    else:
+        try:
+            subs_resp = requests.get(f"{API_URL}/subscriptions/{ACTIVE_USER_ID}", timeout=5)
+            subs_data = subs_resp.json() if subs_resp.status_code == 200 else {"subscriptions": [], "estimated_monthly_value": 0.0}
+        except requests.RequestException:
+            subs_data = {"subscriptions": [], "estimated_monthly_value": 0.0}
+
+        active_subs = subs_data.get("subscriptions", [])
+        monthly_value = subs_data.get("estimated_monthly_value", 0.0)
+
+        m1, m2 = st.columns(2)
+        m1.metric("Active Subscriptions", len(active_subs))
+        m2.metric("Estimated Monthly Cost", f"${monthly_value:,.2f}")
+
+        st.markdown("---")
+        st.subheader("📅 Your Active Subscriptions")
+        if not active_subs:
+            st.info("No active subscriptions yet. Use the Smart Search results' 🔁 button to subscribe to a product.")
+        else:
+            for s in active_subs:
+                prod = s.get("product") or {}
+                with st.container(border=True):
+                    cols = st.columns([0.7, 4, 2, 1.5, 1])
+                    with cols[0]:
+                        st.markdown(
+                            f"<div style='font-size:36px; text-align:center'>{prod.get('emoji', '📦')}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with cols[1]:
+                        st.markdown(f"**{prod.get('product_name', '?')}**")
+                        st.caption(f"{s['frequency']} · qty {s['qty']}")
+                    with cols[2]:
+                        days_until = s.get("days_until_next", 0)
+                        if days_until <= 0:
+                            st.markdown("**⏰ Due today**")
+                        else:
+                            st.markdown(f"Next: in **{days_until:.0f}** days")
+                    with cols[3]:
+                        if prod.get("price"):
+                            st.markdown(f"${prod['price']:,.2f}")
+                    with cols[4]:
+                        if st.button("❌", key=f"sub_cancel_{s['id']}"):
+                            requests.post(f"{API_URL}/subscriptions/{s['id']}/cancel", timeout=5)
+                            st.experimental_rerun()
+
+            if st.button("🚚 Simulate weekly delivery (fulfill due subs)", type="primary"):
+                r = requests.post(f"{API_URL}/subscriptions/fulfill-due", timeout=10)
+                if r.status_code == 200:
+                    count = r.json().get("count", 0)
+                    if count:
+                        st.success(f"✅ Fulfilled {count} subscriptions — items added to your 🛒 Cart.")
+                    else:
+                        st.info("No subscriptions are due right now.")
+
+        st.markdown("---")
+        st.subheader("➕ Subscribe to a new product")
+        st.caption("Type a product name to find and subscribe.")
+        sub_search = st.text_input("Product name", key="sub_new_search")
+        if sub_search:
+            try:
+                sub_resp = requests.post(
+                    f"{API_URL}/search",
+                    json={"query": sub_search, "top_k": 5},
+                    timeout=10,
+                )
+                sub_candidates = sub_resp.json().get("results", []) if sub_resp.status_code == 200 else []
+            except requests.RequestException:
+                sub_candidates = []
+            if sub_candidates:
+                for c in sub_candidates:
+                    cc = st.columns([0.5, 3, 2, 2])
+                    with cc[0]:
+                        st.markdown(f"<div style='font-size:24px'>{c.get('emoji', '📦')}</div>", unsafe_allow_html=True)
+                    with cc[1]:
+                        st.markdown(f"**{c['product_name']}**")
+                    with cc[2]:
+                        freq = st.selectbox(
+                            "Frequency", ["weekly", "biweekly", "monthly"],
+                            key=f"sub_freq_{c['product_id']}",
+                        )
+                    with cc[3]:
+                        if st.button("🔁 Subscribe", key=f"sub_btn_{c['product_id']}"):
+                            requests.post(
+                                f"{API_URL}/subscriptions/add",
+                                json={
+                                    "user_id": ACTIVE_USER_ID,
+                                    "product_id": c["product_id"],
+                                    "frequency": freq,
+                                    "qty": 1,
+                                },
+                                timeout=5,
+                            )
+                            st.success(f"Subscribed to {c['product_name']} ({freq})")
+
+
+with tab5:
     st.markdown("Find alternatives when a product is out of stock — search by name to find your product.")
 
     product_query = st.text_input(
@@ -774,7 +874,7 @@ with tab4:
     elif product_query:
         st.info("No products found. Try a different search term.")
 
-with tab5:
+with tab6:
     assistant_mode = st.radio(
         "Mode",
         ["💬 Q&A", "🍳 Recipe → Cart", "🎯 Goal-based Shopping"],
@@ -953,6 +1053,74 @@ with tab5:
                     )
                 except requests.Timeout:
                     st.warning("Request timed out. Try a simpler question.")
+
+with tab7:
+    st.markdown("Admin dashboard — aggregate behavior log analytics across all users.")
+    try:
+        a_resp = requests.get(f"{API_URL}/analytics/overview", timeout=15)
+        a_data = a_resp.json() if a_resp.status_code == 200 else {}
+    except requests.RequestException as exc:
+        a_data = {}
+        st.error(f"Analytics API unavailable: {exc}")
+
+    if a_data:
+        funnel = a_data.get("funnel", {})
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Views", f"{funnel.get('n_views', 0):,}")
+        m2.metric("Clicks", f"{funnel.get('n_clicks', 0):,}")
+        m3.metric("Add to Cart", f"{funnel.get('n_add_to_cart', 0):,}")
+        m4.metric("Purchases", f"{funnel.get('n_purchases', 0):,}")
+
+        st.markdown("---")
+        st.subheader("🔻 Conversion Funnel Rates")
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        fc1.metric("V → C", f"{funnel.get('view_to_click_rate', 0):.2%}")
+        fc2.metric("C → Cart", f"{funnel.get('click_to_cart_rate', 0):.2%}")
+        fc3.metric("Cart → Buy", f"{funnel.get('cart_to_purchase_rate', 0):.2%}")
+        fc4.metric("Overall", f"{funnel.get('overall_conversion', 0):.2%}")
+
+        st.markdown("---")
+        st.subheader("🔥 Top Products")
+        hp = a_data.get("hot_products", [])
+        if hp:
+            import pandas as _pd
+            st.dataframe(_pd.DataFrame(hp), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("🥬 Category Breakdown")
+        cb = a_data.get("category_breakdown", [])
+        if cb:
+            import pandas as _pd
+            cb_df = _pd.DataFrame(cb)
+            if not cb_df.empty:
+                cb_df["share"] = cb_df["share"].apply(lambda v: f"{v:.1%}")
+                st.dataframe(cb_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("📈 Daily Activity (last 14 days)")
+        daily = a_data.get("daily_counts", [])
+        if daily:
+            import pandas as _pd
+            ddf = _pd.DataFrame(daily).set_index("date")
+            st.line_chart(ddf)
+
+        st.markdown("---")
+        st.subheader("🔍 Top Search Queries")
+        tq = a_data.get("top_queries", [])
+        if tq:
+            import pandas as _pd
+            st.dataframe(_pd.DataFrame(tq), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No search queries logged yet — make a few searches in the 🔍 tab to populate this.")
+
+        st.markdown("---")
+        sq = a_data.get("search_quality", {})
+        st.subheader("✨ Search Quality Signals")
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Total searches", f"{sq.get('total_search_events', 0):,}")
+        sc2.metric("Distinct queries", f"{sq.get('distinct_queries', 0):,}")
+        sc3.metric("CTR", f"{sq.get('click_through_rate', 0):.2%}")
+
 
 # Sidebar with project info
 with st.sidebar:

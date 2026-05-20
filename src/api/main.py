@@ -276,6 +276,10 @@ async def lifespan(app: FastAPI):
     _state["preferences"] = PreferenceStore()
     logger.info("Dietary preferences store ready")
 
+    from src.shopping.subscriptions import SubscriptionStore
+    _state["subscriptions"] = SubscriptionStore()
+    logger.info("Subscription store ready")
+
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
     yield
@@ -1064,6 +1068,97 @@ async def cart_pricing_endpoint(user_id: int):
     summary["promotions_applied"] = [asdict(p) for p in summary["promotions_applied"]]
     summary["promotions_available"] = [asdict(p) for p in summary["promotions_available"]]
     return summary
+
+
+class SubscribeRequest(BaseModel):
+    user_id: int
+    product_id: int
+    frequency: str
+    qty: int = 1
+
+
+@app.post("/subscriptions/add")
+async def subscriptions_add(req: SubscribeRequest):
+    try:
+        sid = _state["subscriptions"].subscribe(req.user_id, req.product_id, req.frequency, req.qty)
+        return {"subscription_id": sid, "status": "active"}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/subscriptions/{subscription_id}/cancel")
+async def subscriptions_cancel(subscription_id: int):
+    _state["subscriptions"].cancel(subscription_id)
+    return {"status": "cancelled"}
+
+
+@app.get("/subscriptions/{user_id}")
+async def subscriptions_for_user(user_id: int):
+    catalog = _state.get("catalog")
+    subs = _state["subscriptions"].get_user_subscriptions(user_id)
+    if not subs:
+        return {"subscriptions": [], "estimated_monthly_value": 0.0}
+    pids = [s["product_id"] for s in subs]
+    df = catalog[catalog["product_id"].isin(pids)].set_index("product_id")
+    enriched = []
+    for s in subs:
+        item = dict(s)
+        if s["product_id"] in df.index:
+            item["product"] = _clean_product(df.loc[s["product_id"]].to_dict())
+        enriched.append(item)
+    monthly_value = _state["subscriptions"].estimated_monthly_value(
+        user_id, _state.get("price_map", {})
+    )
+    return {"subscriptions": enriched, "estimated_monthly_value": monthly_value}
+
+
+@app.post("/subscriptions/fulfill-due")
+async def subscriptions_fulfill():
+    """Demo: simulate the cron firing right now — fulfills all due subs into carts."""
+    from src.shopping.subscriptions import fulfill_due_subscriptions
+    fired = fulfill_due_subscriptions(_state["subscriptions"], _state["cart"])
+    return {"fired": fired, "count": len(fired)}
+
+
+@app.get("/users/{user_id}/recently-viewed")
+async def recently_viewed_endpoint(user_id: int, limit: int = Query(default=10, le=30)):
+    from src.recommend.recently_viewed import get_recently_viewed
+    catalog = _state.get("catalog")
+    pids = get_recently_viewed(_state["behavior"], user_id, limit=limit)
+    if not pids:
+        return {"user_id": user_id, "products": []}
+    df = catalog[catalog["product_id"].isin(pids)].set_index("product_id")
+    products = []
+    for pid in pids:
+        if pid in df.index:
+            products.append(_clean_product(df.loc[pid].to_dict()))
+    return {"user_id": user_id, "products": products}
+
+
+@app.get("/analytics/overview")
+async def analytics_overview():
+    """Aggregated analytics for an admin dashboard."""
+    from src.analytics.dashboard import (
+        top_queries, funnel_metrics, hot_products, daily_event_counts,
+        category_breakdown, search_quality_signals,
+    )
+    from dataclasses import asdict
+    logger_b = _state.get("behavior")
+    catalog = _state.get("catalog")
+    if logger_b is None:
+        raise HTTPException(503, "Behavior log not initialized")
+    funnel = funnel_metrics(logger_b)
+    return {
+        "top_queries": [asdict(q) for q in top_queries(logger_b, limit=10)],
+        "funnel": asdict(funnel),
+        "hot_products": [
+            {"product_id": pid, "count": c}
+            for pid, c in hot_products(logger_b, limit=10)
+        ],
+        "daily_counts": daily_event_counts(logger_b, days_back=14),
+        "category_breakdown": category_breakdown(logger_b, catalog),
+        "search_quality": search_quality_signals(logger_b),
+    }
 
 
 @app.get("/related/{product_id}")
