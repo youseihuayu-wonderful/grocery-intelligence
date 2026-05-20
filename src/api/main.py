@@ -877,6 +877,46 @@ class PreferencesRequest(BaseModel):
     excluded_attributes: list[str] | None = None
 
 
+class FollowupRequest(BaseModel):
+    previous_query: str
+    previous_filters: dict | None = None
+    user_followup: str
+    user_id: int | None = None
+    top_k: int = 10
+
+
+@app.post("/search/followup")
+async def search_followup(req: FollowupRequest):
+    """Multi-turn conversational search: interpret follow-up and re-run search."""
+    from src.models.llm import conversational_search_followup
+    try:
+        interpretation = conversational_search_followup(
+            previous_query=req.previous_query,
+            previous_filters=req.previous_filters or {},
+            user_followup=req.user_followup,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"LLM follow-up interpretation failed: {e}")
+
+    new_query = interpretation.get("interpreted_query", req.previous_query)
+    new_filters = interpretation.get("interpreted_filters", {}) or {}
+    new_attrs = new_filters.get("attributes") or None
+
+    search_req = SearchRequest(
+        query=new_query,
+        top_k=req.top_k,
+        attributes=new_attrs,
+        user_id=req.user_id,
+    )
+    search_resp = await search_products(search_req)
+    return {
+        "interpreted_query": new_query,
+        "interpreted_filters": new_filters,
+        "clarification": interpretation.get("clarification", ""),
+        "search_response": search_resp.model_dump() if hasattr(search_resp, "model_dump") else search_resp.dict(),
+    }
+
+
 @app.get("/preferences/{user_id}")
 async def get_user_preferences(user_id: int):
     prefs = _state["preferences"].get_preferences(user_id)

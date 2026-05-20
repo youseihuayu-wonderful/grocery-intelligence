@@ -403,6 +403,21 @@ with tab1:
         if not query:
             st.warning("⚠️ Please type something in the search box first.")
         else:
+            # Merge sidebar dietary prefs into the search attribute filter
+            applied_attrs = list(selected_attrs)
+            if ACTIVE_USER_ID is not None:
+                try:
+                    pr = requests.get(f"{API_URL}/preferences/{ACTIVE_USER_ID}", timeout=2)
+                    if pr.status_code == 200:
+                        saved = pr.json().get("dietary_attributes", []) or []
+                        for s in saved:
+                            if s not in applied_attrs:
+                                applied_attrs.append(s)
+                        if saved:
+                            st.caption(f"🍃 Auto-applied your saved preferences: {', '.join(saved)}")
+                except requests.RequestException:
+                    pass
+
             with st.spinner(f"Searching across 49,688 products for '{query}'..."):
                 try:
                     response = requests.post(
@@ -411,13 +426,14 @@ with tab1:
                             "query": query,
                             "top_k": top_k,
                             "use_reranker": use_reranker,
-                            "attributes": selected_attrs if selected_attrs else None,
+                            "attributes": applied_attrs if applied_attrs else None,
                             "user_id": ACTIVE_USER_ID,
                         },
                         timeout=30,
                     )
                     if response.status_code == 200:
                         st.session_state["search_data"] = response.json()
+                        st.session_state["last_search_attrs"] = applied_attrs
                         st.session_state["search_input"] = query
                         st.success(f"✅ Got {st.session_state['search_data'].get('total_results', 0)} results — see below ↓")
                     else:
@@ -449,6 +465,44 @@ with tab1:
             st.warning("No products matched. Try a broader query or clear filters.")
         for i, product in enumerate(results, 1):
             render_product_card(product, rank=i)
+
+        # Multi-turn conversational follow-up
+        st.markdown("---")
+        st.subheader("💬 Refine your search")
+        st.caption("Type a follow-up like 'make it organic' or 'cheaper one' or 'show bread instead'")
+        followup = st.text_input(
+            "Follow-up",
+            placeholder="e.g., make it organic · cheaper one · show me yogurt instead",
+            key="followup_input",
+            label_visibility="collapsed",
+        )
+        if st.button("🎤 Apply follow-up", key="followup_btn") and followup:
+            with st.spinner("Interpreting follow-up..."):
+                try:
+                    fr = requests.post(
+                        f"{API_URL}/search/followup",
+                        json={
+                            "previous_query": corrected or last_query,
+                            "previous_filters": {"attributes": st.session_state.get("last_search_attrs", [])},
+                            "user_followup": followup,
+                            "user_id": ACTIVE_USER_ID,
+                            "top_k": top_k,
+                        },
+                        timeout=30,
+                    )
+                    if fr.status_code == 200:
+                        fdata = fr.json()
+                        st.info(f"🤖 {fdata.get('clarification', '')}")
+                        st.session_state["search_data"] = fdata.get("search_response", {})
+                        st.session_state["search_input"] = fdata.get("interpreted_query", followup)
+                        st.session_state["last_search_attrs"] = (
+                            fdata.get("interpreted_filters", {}).get("attributes", [])
+                        )
+                        st.experimental_rerun()
+                    else:
+                        st.error(f"Error: {fr.text[:200]}")
+                except requests.RequestException as exc:
+                    st.error(str(exc))
 
 with tab2:
     st.markdown("Your shopping cart and saved-for-later list.")
