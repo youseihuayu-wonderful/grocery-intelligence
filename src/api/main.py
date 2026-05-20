@@ -79,6 +79,7 @@ class ProductResult(BaseModel):
     feed_score: float | None = None
     emoji: str | None = None
     image_url: str | None = None
+    price: float | None = None
 
 
 class SearchResponse(BaseModel):
@@ -265,6 +266,15 @@ async def lifespan(app: FastAPI):
         logger.info("Redis cache connected")
     else:
         logger.info("Redis not reachable — running without cache layer")
+
+    from src.pricing.mock_prices import build_price_map
+    logger.info("Generating mock prices for all products...")
+    _state["price_map"] = build_price_map(catalog)
+    logger.info(f"Price map built for {len(_state['price_map'])} products")
+
+    from src.users.preferences import PreferenceStore
+    _state["preferences"] = PreferenceStore()
+    logger.info("Dietary preferences store ready")
 
     _state["catalog"] = catalog
     logger.info("All engines initialized. API ready.")
@@ -861,6 +871,161 @@ async def compare_endpoint(ids: str):
     return result
 
 
+class PreferencesRequest(BaseModel):
+    user_id: int
+    dietary_attributes: list[str] | None = None
+    excluded_attributes: list[str] | None = None
+
+
+@app.get("/preferences/{user_id}")
+async def get_user_preferences(user_id: int):
+    prefs = _state["preferences"].get_preferences(user_id)
+    return prefs
+
+
+@app.post("/preferences")
+async def set_user_preferences(req: PreferencesRequest):
+    _state["preferences"].set_preferences(
+        req.user_id,
+        dietary_attributes=req.dietary_attributes or [],
+        excluded_attributes=req.excluded_attributes or [],
+    )
+    return {"status": "saved", "preferences": _state["preferences"].get_preferences(req.user_id)}
+
+
+class RecipeRequest(BaseModel):
+    recipe: str
+    user_id: int | None = None
+
+
+@app.post("/agent/recipe-to-cart")
+async def recipe_to_cart(req: RecipeRequest):
+    """LLM extracts ingredients from a recipe, matches each to a catalog product."""
+    engine = _state.get("search_engine")
+    catalog = _state.get("catalog")
+    if engine is None:
+        raise HTTPException(503, "Search engine not initialized")
+
+    user_prefs = None
+    if req.user_id and _state.get("preferences"):
+        prefs = _state["preferences"].get_preferences(req.user_id)
+        user_prefs = prefs.get("dietary_attributes") or None
+
+    from src.agents.shopping_agent import recipe_to_cart_plan
+    try:
+        plan = recipe_to_cart_plan(
+            req.recipe,
+            search_engine=engine,
+            catalog=catalog,
+            user_dietary_preferences=user_prefs,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Recipe planning failed: {e}")
+
+    matches_out = []
+    for m in plan["matches"]:
+        product = m.matched_product
+        if product is not None:
+            cleaned = _clean_product(product)
+            matches_out.append({
+                "requested_name": m.requested_name,
+                "quantity": m.quantity,
+                "confidence": m.confidence,
+                "product": cleaned,
+            })
+        else:
+            matches_out.append({
+                "requested_name": m.requested_name,
+                "quantity": m.quantity,
+                "confidence": 0.0,
+                "product": None,
+            })
+
+    return {
+        "recipe": plan["recipe"],
+        "summary": plan["summary"],
+        "ingredients": plan["ingredients"],
+        "matches": matches_out,
+    }
+
+
+class GoalRequest(BaseModel):
+    goal: str
+    user_id: int | None = None
+    max_products: int = 15
+
+
+@app.post("/agent/plan-shopping")
+async def plan_shopping(req: GoalRequest):
+    """Higher-level goal interpretation into a shopping plan."""
+    engine = _state.get("search_engine")
+    catalog = _state.get("catalog")
+    if engine is None:
+        raise HTTPException(503, "Search engine not initialized")
+
+    user_prefs = None
+    if req.user_id and _state.get("preferences"):
+        prefs = _state["preferences"].get_preferences(req.user_id)
+        user_prefs = prefs.get("dietary_attributes") or None
+
+    from src.agents.shopping_agent import plan_to_cart_plan
+    try:
+        plan = plan_to_cart_plan(
+            req.goal,
+            search_engine=engine,
+            catalog=catalog,
+            max_products=req.max_products,
+            user_dietary_preferences=user_prefs,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Goal planning failed: {e}")
+
+    categories_out = []
+    for cat in plan["categories"]:
+        items_out = []
+        for m in cat["items"]:
+            if m.matched_product is not None:
+                items_out.append({
+                    "requested_name": m.requested_name,
+                    "confidence": m.confidence,
+                    "product": _clean_product(m.matched_product),
+                })
+        categories_out.append({"category": cat["category"], "items": items_out})
+
+    return {
+        "goal": plan["goal"],
+        "interpretation": plan["interpretation"],
+        "notes": plan["notes"],
+        "categories": categories_out,
+    }
+
+
+@app.get("/pricing/{product_id}/history")
+async def price_history_endpoint(product_id: int, days: int = 90):
+    """Generate a 90-day price history chart for a product."""
+    price_map = _state.get("price_map", {})
+    if product_id not in price_map:
+        raise HTTPException(404, "Product not found in price map")
+    from src.pricing.history import generate_price_history, detect_price_drop
+    history = generate_price_history(product_id, price_map[product_id], days=days)
+    drop = detect_price_drop(history)
+    return {"product_id": product_id, "current_price": price_map[product_id],
+            "history": history, "drop_signal": drop}
+
+
+@app.get("/cart/{user_id}/pricing")
+async def cart_pricing_endpoint(user_id: int):
+    """Returns subtotal, applied/available promotions, total."""
+    cart_response = await cart_get(user_id)
+    items = cart_response["items"]
+    from src.pricing.promotions import cart_pricing_summary
+    from dataclasses import asdict
+    summary = cart_pricing_summary(items)
+    summary["promotions_applied"] = [asdict(p) for p in summary["promotions_applied"]]
+    summary["promotions_available"] = [asdict(p) for p in summary["promotions_available"]]
+    return summary
+
+
 @app.get("/related/{product_id}")
 async def get_related_products(product_id: int, top_k: int = 10):
     """Frequently bought together — Amazon-style item-item recommendations."""
@@ -911,5 +1076,6 @@ def _clean_product(d: dict) -> dict:
         cleaned["attributes"] = attrs if attrs else None
         cleaned["emoji"] = _state.get("emoji_map", {}).get(pid)
         cleaned["image_url"] = _state.get("image_map", {}).get(pid)
+        cleaned["price"] = _state.get("price_map", {}).get(pid)
 
     return cleaned

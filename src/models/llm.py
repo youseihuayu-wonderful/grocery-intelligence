@@ -227,3 +227,424 @@ def answer_question(
     answer = response.choices[0].message.content
     logger.info(f"Q&A: '{question}' -> '{answer}'")
     return {"answer": answer, "model": model}
+
+
+def extract_recipe_ingredients(
+    recipe_query: str,
+    client: "OpenAI | None" = None,
+) -> list[dict]:
+    """LLM extracts a list of ingredients from a recipe / dish name / meal description.
+
+    Examples:
+        Input: "Korean beef bowls"
+        Output: [
+            {"name": "ground beef", "quantity": "1 lb", "category_hint": "meat"},
+            {"name": "white rice", "quantity": "2 cups", "category_hint": "grains"},
+            {"name": "soy sauce", "quantity": "1/4 cup", "category_hint": "pantry"},
+            {"name": "garlic", "quantity": "3 cloves", "category_hint": "produce"},
+            {"name": "green onion", "quantity": "2 stalks", "category_hint": "produce"},
+            ...
+        ]
+
+    The category_hint is a hint to help the catalog matcher narrow down
+    (typical departments: produce, dairy eggs, meat seafood, pantry,
+    bakery, frozen, beverages, snacks). Use null if unsure.
+    """
+    if client is None:
+        client = get_client()
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a culinary assistant for a grocery shopping app. "
+                    "Given a recipe, dish name, or meal description, produce a "
+                    "complete shopping ingredient list.\n\n"
+                    "Return JSON with a top-level key \"ingredients\" whose value "
+                    "is an array of objects. Each object MUST have:\n"
+                    "- \"name\": short generic grocery item name "
+                    "(e.g. \"ground beef\", \"white rice\", \"soy sauce\")\n"
+                    "- \"quantity\": estimated quantity as a string "
+                    "(e.g. \"1 lb\", \"2 cups\", \"3 cloves\") "
+                    "or null if unknown\n"
+                    "- \"category_hint\": one of "
+                    "[\"produce\", \"dairy eggs\", \"meat seafood\", "
+                    "\"pantry\", \"bakery\", \"frozen\", \"beverages\", "
+                    "\"snacks\"] or null if unsure\n\n"
+                    "Use simple generic names that match grocery catalogs. "
+                    "Avoid duplicates. Omit very common pantry items "
+                    "(salt, pepper, water) unless central to the dish."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Recipe / dish / meal: {recipe_query}",
+            },
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+
+    raw = json.loads(response.choices[0].message.content)
+    # Be lenient — the model might wrap the list under different keys.
+    if isinstance(raw, dict):
+        for key in ("ingredients", "items", "list", "result"):
+            if key in raw and isinstance(raw[key], list):
+                ingredients = raw[key]
+                break
+        else:
+            # Fall back: collect any list-valued field.
+            ingredients = next(
+                (v for v in raw.values() if isinstance(v, list)), []
+            )
+    elif isinstance(raw, list):
+        ingredients = raw
+    else:
+        ingredients = []
+
+    # Normalize each entry — ensure keys exist.
+    normalized = []
+    for item in ingredients:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not name:
+            continue
+        normalized.append(
+            {
+                "name": str(name).strip(),
+                "quantity": item.get("quantity"),
+                "category_hint": item.get("category_hint"),
+            }
+        )
+
+    logger.info(
+        f"extract_recipe_ingredients: '{recipe_query}' -> "
+        f"{len(normalized)} ingredients"
+    )
+    return normalized
+
+
+def plan_shopping_goal(
+    goal: str,
+    user_profile_summary: str | None = None,
+    client: "OpenAI | None" = None,
+) -> dict:
+    """Convert a goal statement into a shopping plan structure.
+
+    Example:
+        Input: "Healthy lunches for the work week, under $50 total"
+        Output: {
+            "interpretation": "5 healthy work lunches for one person, budget ~$50",
+            "shopping_categories": [
+                {"category": "proteins", "items": ["grilled chicken breast", "boiled eggs", ...]},
+                {"category": "vegetables", "items": ["spinach", "tomatoes", ...]},
+                ...
+            ],
+            "notes": "Optional advice about meal-prep, budget, etc."
+        }
+    """
+    if client is None:
+        client = get_client()
+
+    user_context = ""
+    if user_profile_summary:
+        user_context = (
+            f"\n\nUser context (for personalization):\n{user_profile_summary}"
+        )
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an AI shopping planner. Given a high-level "
+                    "shopping goal, produce a structured grocery plan.\n\n"
+                    "Return JSON with EXACTLY these keys:\n"
+                    "- \"interpretation\": 1 sentence explaining how you "
+                    "understood the goal (servings, occasion, constraints).\n"
+                    "- \"shopping_categories\": array of objects, each with "
+                    "\"category\" (a short label like \"proteins\", "
+                    "\"vegetables\", \"grains\", \"dairy\", \"pantry\", "
+                    "\"snacks\", \"beverages\") and \"items\" (an array of "
+                    "short generic grocery item names).\n"
+                    "- \"notes\": 1-2 sentence advice about meal-prep, "
+                    "budget, substitutions, or storage. May be empty string.\n\n"
+                    "Use simple grocery-catalog-friendly item names. "
+                    "Respect any explicit dietary, budget, or serving "
+                    "constraints in the goal."
+                ),
+            },
+            {"role": "user", "content": f"Goal: {goal}{user_context}"},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+    )
+
+    raw = json.loads(response.choices[0].message.content)
+    # Normalize — guarantee the three keys exist.
+    plan = {
+        "interpretation": raw.get("interpretation", "") if isinstance(raw, dict) else "",
+        "shopping_categories": [],
+        "notes": raw.get("notes", "") if isinstance(raw, dict) else "",
+    }
+    cats = raw.get("shopping_categories") if isinstance(raw, dict) else None
+    if isinstance(cats, list):
+        for entry in cats:
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("category") or entry.get("name") or ""
+            items = entry.get("items") or []
+            if not isinstance(items, list):
+                continue
+            cleaned_items = [str(it).strip() for it in items if it]
+            plan["shopping_categories"].append(
+                {"category": str(label).strip(), "items": cleaned_items}
+            )
+
+    logger.info(
+        f"plan_shopping_goal: '{goal}' -> {len(plan['shopping_categories'])} categories"
+    )
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn conversational search
+# ---------------------------------------------------------------------------
+
+# Attribute IDs the model is allowed to emit. Kept in sync with
+# ``src/search/attributes.py::ALL_ATTRIBUTES`` but inlined here so this
+# module stays cheap to import (no pandas pull-through).
+_KNOWN_ATTRIBUTE_IDS: tuple[str, ...] = (
+    "dairy-free",
+    "gluten-free",
+    "high-fiber",
+    "high-protein",
+    "keto-friendly",
+    "kosher",
+    "low-calorie",
+    "low-carb",
+    "low-fat",
+    "low-sugar",
+    "non-gmo",
+    "nut-free",
+    "organic",
+    "sugar-free",
+    "vegan",
+    "vegetarian",
+    "whole-grain",
+)
+
+# Sort hints the model is allowed to emit. Search engine maps these.
+_KNOWN_SORT_BY: tuple[str, ...] = (
+    "price",          # cheaper / cheapest / lowest price
+    "price_desc",     # most expensive
+    "rating",         # best rated / healthier (proxy)
+    "popularity",     # popular / most ordered
+    "relevance",      # default
+)
+
+_CONVERSATIONAL_SYSTEM_PROMPT = (
+    "You are a multi-turn grocery search assistant. The user is having "
+    "a conversation with a search engine. You receive:\n"
+    "  - previous_query: the user's last search text (string)\n"
+    "  - previous_filters: filters active on that last search (object, "
+    "may contain keys like 'attributes' (list of IDs) or 'sort_by').\n"
+    "  - user_followup: the new turn the user just typed.\n\n"
+    "Your job is to classify the follow-up and produce the NEXT search:\n"
+    "  1. TOPIC SHIFT: the user is asking for a different product "
+    "(e.g. previous_query='yogurt', followup='show me bread instead' "
+    "or just 'bread'). In this case set interpreted_query to the new "
+    "product and RESET interpreted_filters to {} unless the follow-up "
+    "explicitly keeps a filter.\n"
+    "  2. REFINEMENT: the user wants the same product but with a new "
+    "constraint (e.g. 'make it organic', 'cheaper one', 'gluten free "
+    "version'). In this case keep interpreted_query == previous_query "
+    "and MERGE the new filters into previous_filters.\n"
+    "  3. SORT HINT: words like 'cheaper', 'cheapest', 'lowest price' "
+    "-> sort_by='price'. 'most expensive' -> 'price_desc'. 'popular', "
+    "'most popular', 'best selling' -> 'popularity'. 'healthier', "
+    "'best rated' -> 'rating'.\n"
+    "  4. AMBIGUOUS / unclear: prefer KEEPING previous_query and "
+    "previous_filters and put a short note in clarification.\n\n"
+    "Known attribute IDs (use ONLY these in 'attributes', lowercase, "
+    "hyphenated): "
+    + ", ".join(_KNOWN_ATTRIBUTE_IDS)
+    + ".\n"
+    "Known sort_by values: " + ", ".join(_KNOWN_SORT_BY) + ".\n\n"
+    "Return JSON with EXACTLY these keys:\n"
+    '  - "interpreted_query": string (the search text for the next turn)\n'
+    '  - "interpreted_filters": object with optional keys "attributes" '
+    '(array of known attribute IDs) and "sort_by" (one of the known '
+    "sort values). Omit keys you don't need; do not invent new keys.\n"
+    '  - "clarification": one short sentence describing what you did, '
+    "in natural English (shown to the user).\n\n"
+    "Rules:\n"
+    "  - Never invent attribute IDs. If the user mentions a constraint "
+    "you don't recognize, leave it out of attributes (you may still "
+    "mention it in clarification).\n"
+    "  - Deduplicate the attributes list.\n"
+    "  - When in doubt, default to keeping previous_query."
+)
+
+
+def conversational_search_followup(
+    previous_query: str,
+    previous_filters: dict,
+    user_followup: str,
+    client: "OpenAI | None" = None,
+) -> dict:
+    """Interpret a follow-up turn in a multi-turn search conversation.
+
+    Examples:
+        prev_query='yogurt', prev_filters={}, followup='make it organic'
+        -> {
+            "interpreted_query": "yogurt",
+            "interpreted_filters": {"attributes": ["organic"]},
+            "clarification": "Searching yogurt with the organic filter."
+          }
+
+        prev_query='almond milk',
+        prev_filters={"attributes":["organic"]},
+        followup='cheaper one'
+        -> {
+            "interpreted_query": "almond milk",
+            "interpreted_filters": {
+                "attributes": ["organic"],
+                "sort_by": "price",
+            },
+            "clarification": "Sorting organic almond milk by price ascending."
+          }
+
+        followup='show me yogurt instead'  (topic change!)
+        -> {
+            "interpreted_query": "yogurt",
+            "interpreted_filters": {},  # reset
+            "clarification": "Switching to yogurt search."
+          }
+
+    Uses ``gpt-4o-mini``, ``response_format=json_object``, ``temperature=0``.
+
+    Robust to malformed model output: on JSON parse failure, returns
+    ``{"interpreted_query": previous_query, "interpreted_filters": {},
+    "clarification": "Could not interpret follow-up; reusing previous query."}``.
+    """
+    if client is None:
+        client = get_client()
+
+    # Defensive: ensure previous_filters is a dict we can dump to JSON.
+    prev_filters_payload: dict = (
+        previous_filters if isinstance(previous_filters, dict) else {}
+    )
+
+    user_payload = json.dumps(
+        {
+            "previous_query": str(previous_query or ""),
+            "previous_filters": prev_filters_payload,
+            "user_followup": str(user_followup or ""),
+        },
+        ensure_ascii=False,
+    )
+
+    fallback = {
+        "interpreted_query": str(previous_query or ""),
+        "interpreted_filters": {},
+        "clarification": (
+            "Could not interpret follow-up; reusing previous query."
+        ),
+    }
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": _CONVERSATIONAL_SYSTEM_PROMPT},
+                {"role": "user", "content": user_payload},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        content = response.choices[0].message.content
+        raw = json.loads(content) if content else {}
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning(
+            f"conversational_search_followup: malformed response "
+            f"({exc}); returning fallback."
+        )
+        return fallback
+    except Exception as exc:  # noqa: BLE001 — network / client errors
+        logger.warning(
+            f"conversational_search_followup: client error "
+            f"({type(exc).__name__}: {exc}); returning fallback."
+        )
+        return fallback
+
+    if not isinstance(raw, dict):
+        logger.warning(
+            f"conversational_search_followup: response was not a dict "
+            f"({type(raw).__name__}); returning fallback."
+        )
+        return fallback
+
+    # Normalize interpreted_query — default to previous_query when missing.
+    interpreted_query = raw.get("interpreted_query")
+    if not isinstance(interpreted_query, str) or not interpreted_query.strip():
+        interpreted_query = str(previous_query or "")
+    else:
+        interpreted_query = interpreted_query.strip()
+
+    # Normalize interpreted_filters — keep only known keys with valid shapes.
+    raw_filters = raw.get("interpreted_filters")
+    interpreted_filters: dict = {}
+    if isinstance(raw_filters, dict):
+        attrs = raw_filters.get("attributes")
+        if isinstance(attrs, list):
+            known = set(_KNOWN_ATTRIBUTE_IDS)
+            cleaned_attrs: list[str] = []
+            seen: set[str] = set()
+            for a in attrs:
+                if not isinstance(a, str):
+                    continue
+                a_norm = a.strip().lower()
+                # Keep both known IDs and (defensively) any non-empty
+                # hyphenated string the engine might recognize. We
+                # intentionally allow unknown IDs through so the engine
+                # can decide; this matches the docstring promise that
+                # the function is forgiving.
+                if not a_norm:
+                    continue
+                if a_norm in seen:
+                    continue
+                seen.add(a_norm)
+                if a_norm in known or all(
+                    ch.isalnum() or ch in "-_" for ch in a_norm
+                ):
+                    cleaned_attrs.append(a_norm)
+            if cleaned_attrs:
+                interpreted_filters["attributes"] = cleaned_attrs
+
+        sort_by = raw_filters.get("sort_by")
+        if isinstance(sort_by, str) and sort_by.strip():
+            sb = sort_by.strip().lower()
+            if sb in _KNOWN_SORT_BY:
+                interpreted_filters["sort_by"] = sb
+
+    # Clarification — short natural-language description.
+    clarification = raw.get("clarification")
+    if not isinstance(clarification, str):
+        clarification = ""
+    clarification = clarification.strip()
+
+    result = {
+        "interpreted_query": interpreted_query,
+        "interpreted_filters": interpreted_filters,
+        "clarification": clarification,
+    }
+    logger.info(
+        f"conversational_search_followup: prev='{previous_query}' "
+        f"followup='{user_followup}' -> {result}"
+    )
+    return result
