@@ -430,7 +430,6 @@ _KNOWN_ATTRIBUTE_IDS: tuple[str, ...] = (
     "low-fat",
     "low-sugar",
     "non-gmo",
-    "nut-free",
     "organic",
     "sugar-free",
     "vegan",

@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import pandas as pd  # noqa: E402
 
 from src.pricing.history import detect_price_drop, generate_price_history  # noqa: E402
-from src.pricing.mock_prices import attach_prices, build_price_map  # noqa: E402
+from src.pricing.synthetic_prices import attach_prices, build_price_map  # noqa: E402
 from src.pricing.promotions import cart_pricing_summary, evaluate_promotions  # noqa: E402
 
 CATALOG_PATH = REPO_ROOT / "data" / "processed" / "product_catalog.parquet"

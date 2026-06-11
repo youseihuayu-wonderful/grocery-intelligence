@@ -143,41 +143,58 @@ def test_low_calorie_and_low_fat_emit_together():
 
 
 # ---------------------------------------------------------------------------
-# Allergen-aware nut-free
+# Natural-language nutrition intent parsing
 # ---------------------------------------------------------------------------
 
 
-def test_nut_free_emitted_when_allergens_present_without_nuts():
+def test_parse_intent_detects_multiple_constraints():
+    from src.search.attributes import parse_nutrition_intent
+    assert parse_nutrition_intent("high protein low sugar breakfast") == [
+        "high-protein", "low-sugar"
+    ]
+
+
+def test_parse_intent_detects_dietary_terms():
+    from src.search.attributes import parse_nutrition_intent
+    assert parse_nutrition_intent("vegan gluten free snacks") == [
+        "gluten-free", "vegan"
+    ]
+
+
+def test_parse_intent_is_conservative_on_bare_nouns():
+    from src.search.attributes import parse_nutrition_intent
+    # A bare "sugar" or "cheap milk" must NOT trigger a nutrition filter.
+    assert parse_nutrition_intent("sugar") == []
+    assert parse_nutrition_intent("cheap milk") == []
+
+
+def test_parse_intent_empty_query():
+    from src.search.attributes import parse_nutrition_intent
+    assert parse_nutrition_intent("") == []
+
+
+def test_parse_intent_only_returns_known_attributes():
+    from src.search.attributes import parse_nutrition_intent, ALL_ATTRIBUTES
+    detected = parse_nutrition_intent(
+        "organic low calorie high fiber keto vegan dairy free"
+    )
+    assert set(detected).issubset(set(ALL_ATTRIBUTES))
+
+
+# ---------------------------------------------------------------------------
+# Allergen-derived attributes intentionally removed
+# ---------------------------------------------------------------------------
+
+
+def test_no_allergen_derived_attributes():
+    """The Instacart catalog has no populated allergens_en, so no allergen-based
+    attribute (e.g. the former 'nut-free') may be emitted — asserting one from
+    sparse data would be an unsafe false claim. Even with allergen text present,
+    extract_attributes must not invent a nut-free claim."""
     product = {
         "product_name": "Cheese Crackers",
         "allergens_en": "en:milk,en:gluten",
     }
-    assert "nut-free" in extract_attributes(product)
-
-
-def test_nut_free_suppressed_when_nut_allergen_present():
-    product = {
-        "product_name": "Granola Bar",
-        "allergens_en": "en:milk,en:nuts",
-    }
-    assert "nut-free" not in extract_attributes(product)
-
-
-def test_nut_free_suppressed_when_specific_nut_listed():
-    for token in ("peanut", "almond", "cashew", "walnut"):
-        product = {
-            "product_name": "Trail Mix",
-            "allergens_en": f"en:milk,en:{token}",
-        }
-        assert "nut-free" not in extract_attributes(product), (
-            f"nut-free leaked through for allergen token {token!r}"
-        )
-
-
-def test_nut_free_not_emitted_when_allergens_missing():
-    """If allergens_en is null we genuinely don't know. The spec says we
-    should NOT emit nut-free in that case."""
-    product = {"product_name": "Mystery Snack", "allergens_en": None}
     assert "nut-free" not in extract_attributes(product)
 
 

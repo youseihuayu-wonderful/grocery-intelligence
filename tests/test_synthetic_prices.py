@@ -1,4 +1,4 @@
-"""Tests for :mod:`src.pricing.mock_prices`."""
+"""Tests for :mod:`src.pricing.synthetic_prices`."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.pricing.mock_prices import (
+from src.pricing.synthetic_prices import (
     BASE_PRICES,
     DEFAULT_BASE_PRICE,
     attach_prices,
     build_price_map,
-    generate_mock_price,
+    generate_synthetic_price,
 )
 
 
@@ -40,40 +40,40 @@ def _make_product(**overrides) -> dict:
 
 
 # ----------------------------------------------------------------------
-# generate_mock_price — single product
+# generate_synthetic_price — single product
 # ----------------------------------------------------------------------
 
 
-def test_generate_mock_price_is_deterministic() -> None:
+def test_generate_synthetic_price_is_deterministic() -> None:
     """Same input must yield exactly the same output."""
     product = _make_product()
-    p1 = generate_mock_price(product)
-    p2 = generate_mock_price(product)
-    p3 = generate_mock_price(dict(product))
+    p1 = generate_synthetic_price(product)
+    p2 = generate_synthetic_price(product)
+    p3 = generate_synthetic_price(dict(product))
     assert p1 == p2 == p3
 
 
-def test_generate_mock_price_different_departments() -> None:
+def test_generate_synthetic_price_different_departments() -> None:
     """Different department → different base price → different output."""
-    produce = generate_mock_price(_make_product(department="produce", order_count=0))
-    meat = generate_mock_price(
+    produce = generate_synthetic_price(_make_product(department="produce", order_count=0))
+    meat = generate_synthetic_price(
         _make_product(department="meat seafood", order_count=0)
     )
-    alcohol = generate_mock_price(
+    alcohol = generate_synthetic_price(
         _make_product(department="alcohol", order_count=0)
     )
     assert produce < meat < alcohol
 
 
-def test_generate_mock_price_organic_bump() -> None:
+def test_generate_synthetic_price_organic_bump() -> None:
     """The word 'organic' in the name should raise the price ~30%."""
-    base = generate_mock_price(
+    base = generate_synthetic_price(
         _make_product(
             product_name="Banana", department="produce",
             order_count=0, nutrition_grade="",
         )
     )
-    organic = generate_mock_price(
+    organic = generate_synthetic_price(
         _make_product(
             product_name="Organic Banana", department="produce",
             order_count=0, nutrition_grade="",
@@ -84,33 +84,33 @@ def test_generate_mock_price_organic_bump() -> None:
     assert organic / base >= 1.25
 
 
-def test_generate_mock_price_nutrition_grade_a_higher() -> None:
+def test_generate_synthetic_price_nutrition_grade_a_higher() -> None:
     """Grade A items get a 10% bump."""
-    a_grade = generate_mock_price(
+    a_grade = generate_synthetic_price(
         _make_product(nutrition_grade="a", order_count=0, product_name="X")
     )
-    no_grade = generate_mock_price(
+    no_grade = generate_synthetic_price(
         _make_product(nutrition_grade="", order_count=0, product_name="X")
     )
     assert a_grade > no_grade
 
 
-def test_generate_mock_price_nutrition_grade_low_lower() -> None:
+def test_generate_synthetic_price_nutrition_grade_low_lower() -> None:
     """Grade D / E get a 10% reduction."""
     for low in ("d", "e"):
-        low_grade = generate_mock_price(
+        low_grade = generate_synthetic_price(
             _make_product(nutrition_grade=low, order_count=0, product_name="X")
         )
-        no_grade = generate_mock_price(
+        no_grade = generate_synthetic_price(
             _make_product(nutrition_grade="", order_count=0, product_name="X")
         )
         assert low_grade < no_grade
 
 
-def test_generate_mock_price_minimum_floor() -> None:
+def test_generate_synthetic_price_minimum_floor() -> None:
     """Even on a (theoretical) zero base, we shouldn't drop below $0.99."""
     # 'unknown' department + grade E + no popularity = the lowest realistic combo.
-    price = generate_mock_price(
+    price = generate_synthetic_price(
         {
             "product_name": "x",
             "department": "no_such_department_at_all",
@@ -121,28 +121,28 @@ def test_generate_mock_price_minimum_floor() -> None:
     assert price >= 0.99
 
 
-def test_generate_mock_price_handles_missing_fields() -> None:
+def test_generate_synthetic_price_handles_missing_fields() -> None:
     """Robust to missing / None / NaN values."""
-    p = generate_mock_price({})
+    p = generate_synthetic_price({})
     assert p >= 0.99
-    p2 = generate_mock_price(
+    p2 = generate_synthetic_price(
         {"product_name": None, "department": None, "nutrition_grade": None,
          "order_count": None}
     )
     assert p2 >= 0.99
-    p3 = generate_mock_price(
+    p3 = generate_synthetic_price(
         {"product_name": float("nan"), "department": "produce",
          "nutrition_grade": float("nan"), "order_count": float("nan")}
     )
     assert p3 >= 0.99
 
 
-def test_generate_mock_price_popularity_boost_is_capped() -> None:
+def test_generate_synthetic_price_popularity_boost_is_capped() -> None:
     """Popular items get a boost, but it caps out at +$5."""
-    quiet = generate_mock_price(
+    quiet = generate_synthetic_price(
         _make_product(department="pantry", order_count=1, nutrition_grade="")
     )
-    busy = generate_mock_price(
+    busy = generate_synthetic_price(
         _make_product(department="pantry", order_count=10**9, nutrition_grade="")
     )
     # Cap is $5; pantry base $4. Multiplier 1.0, so max is ~$9 strictly.
@@ -195,7 +195,7 @@ def test_build_price_map_matches_per_row() -> None:
     )
     pmap = build_price_map(df)
     for _, row in df.iterrows():
-        expected = generate_mock_price(row.to_dict())
+        expected = generate_synthetic_price(row.to_dict())
         # Round both sides; FP differences can show up in the last
         # decimal between the per-row and vectorized paths.
         assert pmap[int(row["product_id"])] == pytest.approx(expected, abs=0.01)

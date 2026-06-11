@@ -77,7 +77,6 @@ ATTRIBUTE_LABELS = {
     "low-calorie": "⚖️ Low Calorie",
     "low-fat": "🥦 Low Fat",
     "high-fiber": "🌾 High Fiber",
-    "nut-free": "🥜 Nut-Free",
 }
 
 
@@ -146,11 +145,14 @@ def render_product_card(product, rank=None, show_score=True, score_key="relevanc
             price = product.get("price")
             if price is not None:
                 st.markdown(f"### ${price:,.2f}")
+                st.caption("est.")
             if popularity:
                 st.caption(f"📊 {popularity:,} orders")
             personalization = product.get("personalization_score")
             if personalization and personalization > 0.2:
                 st.caption(f"🎯 Match: {int(personalization * 100)}%")
+            if show_score and score is not None:
+                st.caption(f"🔢 Score: {score:.3f}")
 
         # Badges row
         if badges:
@@ -213,9 +215,56 @@ with tab0:
             pass
         return []
 
+    def _fetch_recommend(user_id, top_k=6, exclude_purchased=False):
+        try:
+            r = requests.get(
+                f"{API_URL}/recommend",
+                params={
+                    "user_id": user_id,
+                    "top_k": top_k,
+                    "exclude_purchased": exclude_purchased,
+                },
+                timeout=15,
+            )
+            if r.status_code == 200:
+                return r.json()
+        except requests.RequestException:
+            pass
+        return {}
+
     if ACTIVE_USER_ID is not None:
+        st.subheader("🎯 Recommended for You")
+        st.caption(
+            "Two-tower neural retrieval model trained on real purchases — "
+            "Recall@10 **+56%** vs popularity (FAISS candidate generation)"
+        )
+        novel_only = st.toggle(
+            "Show only new products (exclude past purchases)",
+            value=False,
+            key="rec_novel_only",
+            help="Off = grocery reorder task (69% of next purchases are repurchases). "
+                 "On = novel-item discovery.",
+        )
+        rec = _fetch_recommend(
+            ACTIVE_USER_ID, top_k=6, exclude_purchased=novel_only
+        )
+        rec_products = rec.get("products", [])
+        if rec.get("source") == "popularity":
+            st.info(
+                "❄️ Cold-start user (no usable purchase history) — "
+                "showing popularity-based picks instead."
+            )
+        if rec_products:
+            for i, p in enumerate(rec_products, 1):
+                render_product_card(
+                    p, rank=i, show_score=True, score_key="feed_score"
+                )
+        else:
+            st.info("No recommendations available yet.")
+        st.markdown("---")
+
         st.subheader("✨ For You")
-        st.caption(f"Personalized based on User {ACTIVE_USER_ID}'s order history")
+        st.caption(f"Content-based profile from User {ACTIVE_USER_ID}'s order history")
         for_you_products = _fetch_feed("for-you", user_id=ACTIVE_USER_ID, top_k=6)
         if for_you_products:
             for i, p in enumerate(for_you_products, 1):
@@ -462,6 +511,16 @@ with tab1:
         results = data.get("results", [])
         st.subheader(f"📦 Results for \"{corrected or last_query}\" ({data.get('total_results', 0)} found)")
 
+        applied = data.get("applied_filters")
+        if applied:
+            chips = " ".join(ATTRIBUTE_LABELS.get(a, a) for a in applied)
+            st.success(f"🥗 Auto-detected health filters from your query: {chips}")
+            st.caption(
+                "Only products with **verified** Open Food Facts nutrition data "
+                "that meet these criteria are shown — nutrition data covers ~15% "
+                "of the catalog, so some relevant items may be hidden."
+            )
+
         if not results:
             st.warning("No products matched. Try a broader query or clear filters.")
         for i, product in enumerate(results, 1):
@@ -588,6 +647,7 @@ with tab2:
                 bottom_cols[0].metric("Subtotal", f"${subtotal:,.2f}")
                 bottom_cols[1].metric("Discount", f"-${total_discount:,.2f}")
                 bottom_cols[2].metric("**Total**", f"${final_total:,.2f}")
+                st.caption("💡 Prices are synthetic estimates — Instacart ships no price data.")
 
             cart_button_cols = st.columns([2, 1])
             with cart_button_cols[0]:
@@ -1144,7 +1204,6 @@ with st.sidebar:
             ("high-protein", "💪 High Protein"),
             ("low-fat", "🥦 Low Fat"),
             ("keto-friendly", "🥑 Keto"),
-            ("nut-free", "🥜 Nut-Free"),
         ]
         current = set(saved_prefs.get("dietary_attributes", []))
         st.caption("Select dietary requirements to auto-filter your searches.")
@@ -1203,8 +1262,15 @@ with st.sidebar:
         "- **Embeddings**: all-MiniLM-L6-v2 (384d)\n"
         "- **Reranker**: ms-marco-MiniLM-L-6-v2\n"
         "- **Search**: BM25 + Semantic + RRF\n"
+        "- **Recommender**: two-tower + FAISS retrieval\n"
         "- **Backend**: FastAPI\n"
         "- **Data**: Instacart + Open Food Facts"
+    )
+    st.markdown("---")
+    st.caption(
+        "💡 **Note on prices**: Instacart ships no price data, so prices shown "
+        "are *deterministic synthetic estimates* (from department, nutrition, and "
+        "popularity) — not real market prices. Everything else is real data."
     )
 
     # Quick health check

@@ -1,4 +1,4 @@
-"""Deterministic mock-price generation for the grocery catalog.
+"""Deterministic synthetic-price generation for the grocery catalog.
 
 The Instacart catalog ships without price data. To make the cart feel
 real, this module computes a plausible price for every product based on
@@ -9,7 +9,7 @@ external state — so the same product always gets the same price.
 
 Public functions
 ----------------
-- :func:`generate_mock_price` — price one product dict.
+- :func:`generate_synthetic_price` — price one product dict.
 - :func:`build_price_map` — vectorize over a catalog DataFrame.
 - :func:`attach_prices` — mutate a list of product dicts in place.
 """
@@ -96,8 +96,8 @@ def _normalize_text(value) -> str:
     return str(value).lower()
 
 
-def generate_mock_price(product: dict) -> float:
-    """Compute a deterministic mock price for a single product.
+def generate_synthetic_price(product: dict) -> float:
+    """Compute a deterministic synthetic price for a single product.
 
     The algorithm starts from a department-based base price, applies a
     handful of multiplicative adjustments for premium / organic /
@@ -262,7 +262,7 @@ def attach_prices(
 __all__ = [
     "BASE_PRICES",
     "DEFAULT_BASE_PRICE",
-    "generate_mock_price",
+    "generate_synthetic_price",
     "build_price_map",
     "attach_prices",
 ]

@@ -86,9 +86,8 @@ class PreferenceStore:
                            ``organic``, ``gluten-free``, ``vegan``,
                            ``high-protein``, etc.)
         excluded_attributes: negative — products must NOT match any of these
-                            (e.g. user with a peanut allergy excludes
-                            products with ``nut-free`` missing, OR user
-                            excludes ``high-sugar``).
+                            (e.g. a user avoiding sweeteners excludes
+                            ``sugar-free`` items, or excludes ``high-sugar``).
     """
 
     # --------------------------------------------------------------

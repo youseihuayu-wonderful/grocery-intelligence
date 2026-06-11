@@ -44,3 +44,9 @@ chroma_db/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Large two-tower artifacts — regenerate via scripts/train_two_tower.py
+# (small LTR models in models/ are kept tracked on purpose)
+models/two_tower.pt
+models/item_vectors.npy
+models/item_ids.npy

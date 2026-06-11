@@ -10,7 +10,10 @@ Users search naturally — "low-sugar yogurt", "cheap high-protein breakfast" �
 ### 2. Smart Substitute Recommendation
 When products are out of stock, the system recommends alternatives: same brand, cheaper, healthier, or dietary-specific substitutes.
 
-### 3. Shopping Q&A Assistant
+### 3. Personalized Recommendations
+A **two-tower neural retrieval** model (trained on 1M real purchases) generates personalized candidates: the user vector is pooled online from purchase history and queried against precomputed item vectors with **FAISS**. Validated offline at **Recall@10 +56%** vs a popularity baseline (NDCG@10 +62%), with graceful popularity fallback for cold-start users.
+
+### 4. Shopping Q&A Assistant
 Users ask questions like "What can I use instead of heavy cream?" and get answers grounded in real product data.
 
 ## Tech Stack
@@ -30,12 +33,19 @@ Users ask questions like "What can I use instead of heavy cream?" and get answer
 
 ## Data Sources
 
-All data is **real** — no mock or synthetic data.
+Products, purchases, search/click behavior, and nutrition are **all real** —
+no mock or synthetic data.
 
 | Source | What | URL |
 |--------|------|-----|
 | Instacart Market Basket | 50K real products, 3.4M orders | [Kaggle](https://www.kaggle.com/datasets/psparks/instacart-market-basket-analysis) |
-| Open Food Facts | Nutrition, ingredients, allergens for 2M+ products | [openfoodfacts.org](https://world.openfoodfacts.org/) |
+| Open Food Facts | Nutrition macros & ingredients (matched to ~15% of the catalog) | [openfoodfacts.org](https://world.openfoodfacts.org/) |
+
+**One exception — prices are synthetic.** The Instacart catalog ships no price
+data, so `src/pricing/synthetic_prices.py` derives a *deterministic, plausible*
+price for each product from its department, name, nutrition grade, and order
+popularity. Prices are clearly labelled as estimates in the UI; they exist only
+to make the cart/checkout flow feel real and are **not** real market prices.
 
 ## Project Structure
 
@@ -71,6 +81,7 @@ grocery-intelligence/
 | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-Encoder Transformer | Rerank search results | No (pre-trained) |
 | GPT-4o-mini | Decoder Transformer (LLM) | Query rewriting, explanations | No (API, prompt engineering) |
 | XGBoost | Gradient Boosted Trees | Learn-to-rank with business features | Yes (light, seconds) |
+| Two-Tower | Dual-encoder (frozen item tower + history user tower) | Personalized candidate generation | Yes (on real purchases) |
 | BM25 | Statistical (TF-IDF variant) | Keyword baseline search | No |
 
 ## Quick Start
@@ -89,6 +100,10 @@ pip install -r requirements.txt
 
 # Download data
 python scripts/download_data.py
+
+# (Optional) Train the two-tower recommender to enable the /recommend endpoint.
+# Without it, /recommend gracefully falls back to popularity-based picks.
+python scripts/train_two_tower.py --epochs 20   # GPU recommended (Kaggle T4)
 
 # Run the API
 uvicorn src.api.main:app --reload

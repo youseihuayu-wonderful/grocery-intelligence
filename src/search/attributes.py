@@ -53,13 +53,15 @@ _THRESHOLD_RULES: tuple[tuple[str, str, Any, Any], ...] = (
     ("high-fiber", "fiber_100g", _GE, 6.0),
 )
 
-# Allergen-aware: a product gets `nut-free` only when we can prove no
-# nut-related allergen is declared (allergens_en must be present).
-_NUT_TOKENS: tuple[str, ...] = ("nut", "peanut", "almond", "cashew", "walnut")
+# NOTE: an allergen-derived `nut-free` attribute was intentionally removed.
+# The Instacart catalog ships no populated `allergens_en` field (0% coverage),
+# and inferring "nut-free" from the mere absence of nut words in a sparsely
+# populated ingredients list would be an UNSAFE false claim. We only assert
+# attributes we can actually substantiate from real data.
 
 
 # Human-readable labels (with emoji) for the UI. Order roughly groups by
-# dietary -> nutrition -> allergen.
+# dietary -> nutrition.
 ATTRIBUTE_LABELS: dict[str, str] = {
     "organic": "🌿 Organic",
     "gluten-free": "🌾 Gluten-Free",
@@ -77,11 +79,61 @@ ATTRIBUTE_LABELS: dict[str, str] = {
     "low-calorie": "⚖️ Low Calorie",
     "low-fat": "🥦 Low Fat",
     "high-fiber": "🌾 High Fiber",
-    "nut-free": "🥜 Nut-Free",
 }
 
 # Master list of every supported attribute ID, sorted for stable iteration.
 ALL_ATTRIBUTES: list[str] = sorted(ATTRIBUTE_LABELS.keys())
+
+
+# ---------------------------------------------------------------------------
+# Natural-language nutrition / dietary intent
+# ---------------------------------------------------------------------------
+
+# Phrases that signal the user wants results constrained to an attribute, e.g.
+# "high protein low sugar breakfast" -> {"high-protein", "low-sugar"}. Kept
+# conservative and directional: a bare "sugar" must NOT trigger "low-sugar"
+# (the shopper may want sugar). Longer phrases are matched as substrings on the
+# lower-cased query. Each attribute resolves to the SAME id used by
+# extract_attributes, which is only assigned when the product actually has the
+# backing data — so filtering on detected intent never lets unknown-nutrition
+# products masquerade as qualifying.
+_INTENT_PHRASES: dict[str, tuple[str, ...]] = {
+    "high-protein": ("high protein", "high-protein", "protein rich", "rich in protein", "more protein"),
+    "low-sugar": ("low sugar", "low-sugar", "less sugar", "reduced sugar", "no sugar", "sugarless"),
+    "sugar-free": ("sugar free", "sugar-free", "no sugar added", "unsweetened"),
+    "low-calorie": ("low calorie", "low-calorie", "low cal", "fewer calories", "diet ", "light "),
+    "low-fat": ("low fat", "low-fat", "fat free", "fat-free", "reduced fat"),
+    "high-fiber": ("high fiber", "high-fiber", "high fibre", "fiber rich"),
+    "vegan": ("vegan", "plant based", "plant-based"),
+    "vegetarian": ("vegetarian",),
+    "gluten-free": ("gluten free", "gluten-free", "no gluten"),
+    "dairy-free": ("dairy free", "dairy-free", "non-dairy", "non dairy", "lactose free", "lactose-free"),
+    "keto-friendly": ("keto", "ketogenic"),
+    "low-carb": ("low carb", "low-carb"),
+    "organic": ("organic",),
+    "whole-grain": ("whole grain", "whole-grain", "whole wheat"),
+    "non-gmo": ("non gmo", "non-gmo", "no gmo"),
+}
+
+
+def parse_nutrition_intent(query: str) -> list[str]:
+    """Extract dietary / nutrition attribute filters implied by a search query.
+
+    Returns a sorted list of attribute IDs (subset of ``ALL_ATTRIBUTES``).
+    Conservative: only fires on directional phrases so ordinary product
+    searches ("sugar", "milk") are unaffected. ``low-sugar`` and ``sugar-free``
+    can both fire; callers may de-duplicate semantically if desired.
+    """
+    if not query:
+        return []
+    # Pad so leading/trailing single-word phrases like "diet " / "light " match.
+    text = f" {query.lower()} "
+    found = {
+        attr_id
+        for attr_id, phrases in _INTENT_PHRASES.items()
+        if any(phrase in text for phrase in phrases)
+    }
+    return sorted(found)
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +198,8 @@ def extract_attributes(product: dict) -> list[str]:
     Args:
         product: Mapping with keys like ``product_name``, ``ingredients``,
             ``calories_100g``, ``protein_100g``, ``sugar_100g``, ``fat_100g``,
-            ``fiber_100g``, ``nutrition_grade``, ``allergens_en``. Any field
-            may be ``None`` / ``NaN`` — missing values are handled silently.
+            ``fiber_100g``, ``nutrition_grade``. Any field may be ``None`` /
+            ``NaN`` — missing values are handled silently.
 
     Returns:
         Sorted list of attribute IDs the product matches, e.g.
@@ -176,13 +228,6 @@ def extract_attributes(product: dict) -> list[str]:
             continue
         if comparator(value, threshold):
             found.add(attr_id)
-
-    # --- Nut-free (allergen-derived) --------------------------------------
-    allergens_raw = product.get("allergens_en")
-    if not _is_missing(allergens_raw):
-        allergens = str(allergens_raw).lower()
-        if not _text_contains_any(allergens, _NUT_TOKENS):
-            found.add("nut-free")
 
     return sorted(found)
 

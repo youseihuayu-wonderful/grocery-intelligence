@@ -45,6 +45,13 @@ class FeedResponse(BaseModel):
     user_id: int | None = None
 
 
+class RecommendResponse(BaseModel):
+    user_id: int
+    products: list["ProductResult"]
+    source: str  # "two-tower" (personalized) or "popularity" (cold-start fallback)
+    exclude_purchased: bool = False
+
+
 class SubstituteRequest(BaseModel):
     product_id: int
     top_k: int = 5
@@ -87,6 +94,7 @@ class SearchResponse(BaseModel):
     results: list[ProductResult]
     total_results: int
     corrected_query: str | None = None  # populated if spelling correction changed the query
+    applied_filters: list[str] | None = None  # nutrition/dietary filters auto-detected from the query
 
 
 class SubstituteResponse(BaseModel):
@@ -267,10 +275,23 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Redis not reachable — running without cache layer")
 
-    from src.pricing.mock_prices import build_price_map
-    logger.info("Generating mock prices for all products...")
+    from src.pricing.synthetic_prices import build_price_map
+    logger.info("Generating synthetic prices for all products...")
     _state["price_map"] = build_price_map(catalog)
     logger.info(f"Price map built for {len(_state['price_map'])} products")
+
+    two_tower_path = Path(__file__).parent.parent.parent / "models" / "two_tower.pt"
+    if two_tower_path.exists():
+        from src.recommend.two_tower_recommender import TwoTowerRecommender
+        try:
+            _state["two_tower"] = TwoTowerRecommender.load()
+            logger.info("Two-tower recommender loaded")
+        except Exception as e:
+            logger.warning(f"Two-tower recommender load failed: {e}")
+            _state["two_tower"] = None
+    else:
+        logger.info("Two-tower model not found — skipping. Run scripts/train_two_tower.py to enable.")
+        _state["two_tower"] = None
 
     from src.users.preferences import PreferenceStore
     _state["preferences"] = PreferenceStore()
@@ -337,41 +358,52 @@ async def search_products(request: SearchRequest):
             corrected_query = candidate
             effective_query = candidate
 
+    # Honest health filtering: convert natural-language nutrition/dietary intent
+    # ("high protein low sugar breakfast") into attribute filters. Attributes are
+    # only assigned to products that actually have the backing nutrition data and
+    # pass the threshold, so unknown-nutrition products can never masquerade as
+    # qualifying. Merge with any explicit attributes from the request (ALL-of).
+    from src.search.attributes import parse_nutrition_intent
+    detected = parse_nutrition_intent(effective_query)
+    required_attrs = set(request.attributes or []) | set(detected)
+    applied_filters = sorted(required_attrs) or None
+
+    def _filter_by_attrs(rows: list[dict]) -> list[dict]:
+        if not required_attrs:
+            return rows
+        return [
+            r for r in rows
+            if r.get("attributes") and required_attrs.issubset(set(r["attributes"]))
+        ]
+
     from src.search.category_browse import is_category_query, browse_category
     catalog_df = _state.get("catalog")
     if catalog_df is not None and is_category_query(effective_query):
         browse_rows = browse_category(catalog_df, effective_query, top_k=request.top_k)
-        cleaned = [_clean_product(r) for r in browse_rows]
-        if request.attributes:
-            required = set(request.attributes)
-            cleaned = [
-                r for r in cleaned
-                if r.get("attributes") and required.issubset(set(r["attributes"]))
-            ]
+        cleaned = _filter_by_attrs([_clean_product(r) for r in browse_rows])
         cleaned = cleaned[: request.top_k]
         return SearchResponse(
             query=request.query,
             results=[ProductResult(**r) for r in cleaned],
             total_results=len(cleaned),
             corrected_query=corrected_query,
+            applied_filters=applied_filters,
         )
 
-    fetch_k = max(request.top_k * 5, 50)
-
-    results = engine.search(
-        query=effective_query,
-        top_k=fetch_k,
-        use_reranker=request.use_reranker,
-    )
-
-    cleaned = [_clean_product(r) for r in results]
-
-    if request.attributes:
-        required = set(request.attributes)
-        cleaned = [
-            r for r in cleaned
-            if r.get("attributes") and required.issubset(set(r["attributes"]))
-        ]
+    if required_attrs:
+        # Filter-then-rank: rank the whole qualifying subset by relevance, so
+        # low-coverage nutrition filters don't starve on a small candidate pool.
+        cleaned = _filter_then_rank(
+            effective_query, required_attrs, pool_k=max(request.top_k * 5, 100)
+        )
+    else:
+        fetch_k = max(request.top_k * 5, 50)
+        results = engine.search(
+            query=effective_query,
+            top_k=fetch_k,
+            use_reranker=request.use_reranker,
+        )
+        cleaned = [_clean_product(r) for r in results]
 
     from src.recommend.personalization import rerank_with_personalization
     from src.experiments.ab_testing import get_variant_config
@@ -407,6 +439,7 @@ async def search_products(request: SearchRequest):
         results=[ProductResult(**r) for r in cleaned],
         total_results=len(cleaned),
         corrected_query=corrected_query,
+        applied_filters=applied_filters,
     )
 
 
@@ -611,6 +644,59 @@ async def get_feed(
         feed_type=feed_type,
         products=[ProductResult(**c) for c in cleaned],
         user_id=user_id,
+    )
+
+
+@app.get("/recommend", response_model=RecommendResponse)
+async def recommend_for_user(
+    user_id: int,
+    top_k: int = Query(default=20, le=50),
+    exclude_purchased: bool = False,
+):
+    """Personalized recommendations from the two-tower retrieval model.
+
+    Computes the user vector online by pooling the user's purchase-history item
+    embeddings through the trained user tower, then retrieves nearest items via
+    FAISS over the precomputed item vectors. Falls back to popularity
+    (bestsellers) for cold-start users with no usable history.
+    """
+    catalog = _state.get("catalog")
+    if catalog is None:
+        raise HTTPException(503, "Catalog not loaded")
+
+    rec = _state.get("two_tower")
+    source = "two-tower"
+    products: list[dict] = []
+
+    if rec is not None:
+        from src.recommend.two_tower_recommender import ColdStartError
+        try:
+            hits = rec.recommend(
+                user_id, top_k=top_k, exclude_purchased=exclude_purchased
+            )
+            by_id = {int(r["product_id"]): r for r in catalog.to_dict("records")}
+            for pid, score in hits:
+                row = by_id.get(int(pid))
+                if row is None:
+                    continue
+                row = dict(row)
+                row["feed_score"] = float(score)
+                products.append(row)
+        except ColdStartError:
+            source = "popularity"
+
+    if not products:
+        # Cold-start or model unavailable: honest popularity fallback.
+        source = "popularity"
+        from src.recommend.feed import get_bestsellers
+        products = get_bestsellers(catalog, top_k=top_k)
+
+    cleaned = [_clean_product(p) for p in products]
+    return RecommendResponse(
+        user_id=user_id,
+        products=[ProductResult(**c) for c in cleaned],
+        source=source,
+        exclude_purchased=exclude_purchased,
     )
 
 
@@ -1214,3 +1300,57 @@ def _clean_product(d: dict) -> dict:
         cleaned["price"] = _state.get("price_map", {}).get(pid)
 
     return cleaned
+
+
+def _filter_then_rank(query: str, required_attrs: set[str], pool_k: int) -> list[dict]:
+    """Rank the ENTIRE catalog subset satisfying required_attrs by semantic
+    relevance to the query.
+
+    For nutrition-threshold filters (low-sugar, high-protein, ...) only ~15% of
+    the catalog has the backing data, so the usual retrieve-then-filter pipeline
+    (which filters a small candidate pool) starves. This inverts it: filter the
+    whole catalog to qualifying products first, then rank those by query
+    similarity. Every result genuinely satisfies the constraint AND is relevant.
+    """
+    engine = _state.get("search_engine")
+    attrs_map = _state.get("attributes", {})
+    catalog = _state.get("catalog")
+    if engine is None or catalog is None:
+        return []
+
+    qualifying = [
+        int(pid) for pid, a in attrs_map.items()
+        if a and required_attrs.issubset(set(a))
+    ]
+    if not qualifying:
+        return []
+
+    # Cache product_id -> embedding row and product_id -> catalog row (built once).
+    id_to_row = _state.get("_pid_emb_row")
+    if id_to_row is None:
+        id_to_row = {int(p): i for i, p in enumerate(engine.product_ids)}
+        _state["_pid_emb_row"] = id_to_row
+    cat_by_id = _state.get("_catalog_by_id")
+    if cat_by_id is None:
+        cat_by_id = {int(r["product_id"]): r for r in catalog.to_dict("records")}
+        _state["_catalog_by_id"] = cat_by_id
+
+    pairs = [(pid, id_to_row[pid]) for pid in qualifying if pid in id_to_row]
+    if not pairs:
+        return []
+
+    qvec = engine.embedder.embed_query(query)
+    emb_rows = np.array([row for _, row in pairs])
+    sims = engine.embeddings[emb_rows] @ qvec
+    order = np.argsort(-sims)[:pool_k]
+
+    out = []
+    for o in order:
+        pid = pairs[int(o)][0]
+        row = cat_by_id.get(pid)
+        if row is None:
+            continue
+        row = dict(row)
+        row["relevance_score"] = float(sims[int(o)])
+        out.append(_clean_product(row))
+    return out
