@@ -112,6 +112,9 @@ uvicorn src.api.main:app --reload
 streamlit run frontend/app.py
 ```
 
+See **[DEMO.md](DEMO.md)** for a scripted end-to-end walkthrough (search →
+nutrition filtering → substitutes → recommendations → checkout → metrics).
+
 ## License
 
 MIT
