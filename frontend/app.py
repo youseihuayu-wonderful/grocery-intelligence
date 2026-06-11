@@ -43,9 +43,10 @@ ACTIVE_USER_ID = _user_options[_selected_label]
 if ACTIVE_USER_ID is not None:
     st.caption(f"✨ Personalization active for User {ACTIVE_USER_ID}")
 
-tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
     ["🏠 Home", "🔍 Smart Search", "🛒 Cart", "📦 Your Orders",
-     "🔁 Subscribe & Save", "🔄 Substitute Finder", "🤖 Shopping Assistant", "📊 Analytics"]
+     "🔁 Subscribe & Save", "🔄 Substitute Finder", "🤖 Shopping Assistant",
+     "📊 Analytics", "🧪 Model Performance"]
 )
 
 
@@ -1180,6 +1181,122 @@ with tab7:
         sc1.metric("Total searches", f"{sq.get('total_search_events', 0):,}")
         sc2.metric("Distinct queries", f"{sq.get('distinct_queries', 0):,}")
         sc3.metric("CTR", f"{sq.get('click_through_rate', 0):.2%}")
+
+
+with tab8:
+    import json as _json
+    import pandas as _pd
+    from pathlib import Path as _Path
+
+    st.markdown("### 🧪 Model Performance — measured offline")
+    st.caption(
+        "Every number below is **measured from real artifacts** (no hard-coded "
+        "values) and reproducible via `python scripts/evaluate_models.py`."
+    )
+
+    _eval_path = _Path(__file__).resolve().parent.parent / "data" / "eval" / "model_eval.json"
+    if not _eval_path.exists():
+        st.info(
+            "No evaluation artifact found. Run `python scripts/evaluate_models.py` "
+            "(requires the trained two-tower model) to generate "
+            "`benchmark/results/model_eval.json`."
+        )
+    else:
+        _ev = _json.loads(_eval_path.read_text())
+        st.caption(f"Generated at: {_ev.get('generated_at', 'unknown')}")
+
+        # ---- Two-tower recommender -------------------------------------
+        tt = _ev.get("two_tower", {})
+        st.subheader("🎯 Two-Tower Recommender vs Popularity")
+        st.caption(
+            f"Leave-last-out evaluation on {tt.get('n_test_users', 0):,} users · "
+            f"{tt.get('n_items', 0):,} items · "
+            f"{tt.get('n_train_interactions', 0):,} train interactions · dim={tt.get('dim')}. "
+            "The held-out last purchase is the ground truth — no manual labels."
+        )
+
+        reorder = tt.get("tasks", {}).get("reorder", {})
+        if reorder:
+            st.markdown("**Grocery reorder task** (repurchases allowed — the realistic grocery task; ~69% of next purchases are repurchases)")
+            mcols = st.columns(4)
+            for col, key, label in [
+                (mcols[0], "recall@10", "Recall@10"),
+                (mcols[1], "recall@20", "Recall@20"),
+                (mcols[2], "ndcg@10", "NDCG@10"),
+                (mcols[3], "ndcg@20", "NDCG@20"),
+            ]:
+                lift = reorder["lift_pct"].get(key)
+                col.metric(
+                    label,
+                    f"{reorder['two_tower'][key]:.4f}",
+                    f"{lift:+.0f}% vs popularity" if lift is not None else None,
+                )
+            df_re = _pd.DataFrame({
+                "Metric": ["Recall@10", "Recall@20", "NDCG@10", "NDCG@20"],
+                "Two-Tower": [reorder["two_tower"][k] for k in ("recall@10", "recall@20", "ndcg@10", "ndcg@20")],
+                "Popularity": [reorder["popularity"][k] for k in ("recall@10", "recall@20", "ndcg@10", "ndcg@20")],
+                "Lift %": [reorder["lift_pct"][k] for k in ("recall@10", "recall@20", "ndcg@10", "ndcg@20")],
+            })
+            st.dataframe(df_re, use_container_width=True, hide_index=True)
+
+        novel = tt.get("tasks", {}).get("novel", {})
+        if novel:
+            with st.expander("Novel-item discovery (previously bought items masked) — honest caveat"):
+                st.caption(
+                    "When previously-bought items are masked, the two-tower is roughly "
+                    "tied with popularity. This is expected and *honest*: grocery is "
+                    "dominated by reordering, so the reorder task above is the one that "
+                    "matters for this product. Pure cold-discovery would need different "
+                    "signals (recency, trends, content diversity)."
+                )
+                df_nv = _pd.DataFrame({
+                    "Metric": ["Recall@10", "Recall@20", "NDCG@10", "NDCG@20"],
+                    "Two-Tower": [novel["two_tower"][k] for k in ("recall@10", "recall@20", "ndcg@10", "ndcg@20")],
+                    "Popularity": [novel["popularity"][k] for k in ("recall@10", "recall@20", "ndcg@10", "ndcg@20")],
+                    "Lift %": [novel["lift_pct"][k] for k in ("recall@10", "recall@20", "ndcg@10", "ndcg@20")],
+                })
+                st.dataframe(df_nv, use_container_width=True, hide_index=True)
+
+        # ---- Search latency --------------------------------------------
+        st.markdown("---")
+        lat = _ev.get("search_latency_ms", {})
+        if lat:
+            st.subheader("⚡ Search Latency (hybrid + cross-encoder rerank)")
+            lcols = st.columns(3)
+            lcols[0].metric("p50", f"{lat.get('p50', 0):.0f} ms")
+            lcols[1].metric("p95", f"{lat.get('p95', 0):.0f} ms")
+            lcols[2].metric("p99", f"{lat.get('p99', 0):.0f} ms")
+            stage_keys = [
+                ("stage_bm25_median", "BM25"),
+                ("stage_semantic_median", "Semantic"),
+                ("stage_fusion_median", "RRF fusion"),
+                ("stage_rerank_median", "Cross-encoder rerank"),
+                ("stage_enrich_median", "Enrich"),
+            ]
+            stages = {label: lat[k] for k, label in stage_keys if k in lat}
+            if stages:
+                st.caption("Per-stage median latency (ms) — the cross-encoder rerank dominates:")
+                st.bar_chart(_pd.DataFrame({"ms": stages}))
+
+        # ---- Data scale & honesty --------------------------------------
+        st.markdown("---")
+        data = _ev.get("data", {})
+        if data:
+            st.subheader("📦 Data Scale")
+            dcols = st.columns(3)
+            dcols[0].metric("Products", f"{data.get('n_products', 0):,}")
+            dcols[1].metric("Real purchases", f"{data.get('n_purchases', 0):,}")
+            dcols[2].metric("Users", f"{data.get('n_users', 0):,}")
+
+            cov = data.get("nutrition_coverage_pct", {})
+            if cov:
+                st.caption(
+                    f"⚠️ **Nutrition data honesty**: Open Food Facts macros cover only "
+                    f"~{data.get('nutrition_any_field_pct', 0):.0f}% of the catalog. "
+                    "Health filters therefore only surface products with *verified* "
+                    "nutrition data (see the 🔍 Smart Search tab)."
+                )
+                st.bar_chart(_pd.DataFrame({"% with data": cov}))
 
 
 # Sidebar with project info

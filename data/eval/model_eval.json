@@ -1,0 +1,78 @@
+{
+  "generated_at": "2026-06-11T23:18:11+00:00",
+  "two_tower": {
+    "dim": 64,
+    "n_users": 5000,
+    "n_items": 27818,
+    "n_train_interactions": 995000,
+    "n_test_users": 5000,
+    "tasks": {
+      "reorder": {
+        "two_tower": {
+          "recall@10": 0.1252,
+          "recall@20": 0.1742,
+          "ndcg@10": 0.0672,
+          "ndcg@20": 0.0796
+        },
+        "popularity": {
+          "recall@10": 0.0804,
+          "recall@20": 0.1162,
+          "ndcg@10": 0.0414,
+          "ndcg@20": 0.0503
+        },
+        "lift_pct": {
+          "recall@10": 55.7,
+          "recall@20": 49.9,
+          "ndcg@10": 62.5,
+          "ndcg@20": 58.2
+        }
+      },
+      "novel": {
+        "two_tower": {
+          "recall@10": 0.0108,
+          "recall@20": 0.0212,
+          "ndcg@10": 0.0053,
+          "ndcg@20": 0.0079
+        },
+        "popularity": {
+          "recall@10": 0.0118,
+          "recall@20": 0.0188,
+          "ndcg@10": 0.0058,
+          "ndcg@20": 0.0075
+        },
+        "lift_pct": {
+          "recall@10": -8.5,
+          "recall@20": 12.8,
+          "ndcg@10": -9.0,
+          "ndcg@20": 4.6
+        }
+      }
+    }
+  },
+  "search_latency_ms": {
+    "p50": 122.311,
+    "p95": 174.331,
+    "p99": 284.381,
+    "mean": 125.714,
+    "min": 76.327,
+    "max": 299.616,
+    "stage_bm25_median": 13.324,
+    "stage_semantic_median": 13.794,
+    "stage_fusion_median": 0.073,
+    "stage_rerank_median": 89.707,
+    "stage_enrich_median": 3.803
+  },
+  "data": {
+    "n_products": 49688,
+    "n_purchases": 1000000,
+    "n_users": 5000,
+    "nutrition_coverage_pct": {
+      "calories_100g": 15.5,
+      "protein_100g": 15.4,
+      "sugar_100g": 14.1,
+      "fat_100g": 15.4,
+      "fiber_100g": 12.7
+    },
+    "nutrition_any_field_pct": 15.5
+  }
+}
